@@ -1,4 +1,8 @@
-torch>=1.7.0
 2.0.0>numpy>=1.18.0
-tqdm>=4.48.0
-matplotlib>=3.3.0
+tqdm
+matplotlib
+opencv-python
+pillow
+torch
+torchvision
+vgamepad

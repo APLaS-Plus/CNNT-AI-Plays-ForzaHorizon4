@@ -2,7 +2,6 @@ import PIL.Image
 import cv2
 import PIL
 import numpy as np
-import pyautogui
 import time
 from PIL import ImageGrab
 
