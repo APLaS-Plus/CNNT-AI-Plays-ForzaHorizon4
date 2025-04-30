@@ -15,10 +15,10 @@ if __name__ == "__main__":
     time.sleep(2.0)
     controller.start()
 
-    left_trigger_array = [i / 100 for i in range(0, 101)]
-    right_trigger_array = [i / 100 for i in range(0, 101)]
-    left_stick_x_array = [-i / 100 for i in range(0, 101)]
-    left_stick_x_array2 = [i / 100 for i in range(0, 101)]
+    left_trigger_array = [i / 200 for i in range(0, 201)]
+    right_trigger_array = [i + 50 / 250 for i in range(0, 201)]
+    left_stick_x_array = [-i / 200 for i in range(0, 201)]
+    left_stick_x_array2 = [i / 200 for i in range(0, 201)]
 
     # Test left trigger
     for value in left_trigger_array:

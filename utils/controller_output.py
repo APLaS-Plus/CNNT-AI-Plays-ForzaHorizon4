@@ -69,11 +69,11 @@ class ControllerOutput:
 
     def _update_loop(self):
         """The main loop that updates controller state in a separate thread"""
-        print(f"Check running status: {self.running}")
+        # print(f"Check running status: {self.running}")
         while self.running:
             # Small sleep to prevent CPU overuse
             time.sleep(0.01)
-            print(f"Check inside loop: {self.running}")
+            # print(f"Check inside loop: {self.running}")
             with self.lock:
                 # Apply the current control values to the virtual gamepad
                 self.gamepad.left_joystick_float(
@@ -85,8 +85,6 @@ class ControllerOutput:
                 print(f"Updated controls: {self.controls}", flush=True)
 
             # Update the gamepad state
-            self.gamepad.update()
-            self.gamepad.reset()
             self.gamepad.update()
 
     def __del__(self):

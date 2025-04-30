@@ -6,3 +6,4 @@ pillow
 torch
 torchvision
 vgamepad
+pywin32
