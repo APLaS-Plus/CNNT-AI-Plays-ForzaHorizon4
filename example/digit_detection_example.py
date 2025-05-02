@@ -67,6 +67,7 @@ def main():
     predict_img = time.time()
     print("Prediction time:", predict_img - bg_predict)
     print(f"预测的三个数字分别是: {digits_prediction}")
+    print(f"预测的数字组合值为: {digits_prediction[0] * 100 + digits_prediction[1] * 10 + digits_prediction[2]}")
 
     # 计算三位数的值
     numeric_value = 100 * digits_prediction[0] + 10 * digits_prediction[1] + digits_prediction[2]

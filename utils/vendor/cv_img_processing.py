@@ -1,48 +1,60 @@
 # @Author: Dedsecer
 # @Sourceurl: https://github.com/DedSecer/AI-Plays-ForzaHorizon4
+# rebuilt by APLaS
 import cv2
 import numpy as np
 
 def extract_blue(screen_in):
-    # 将图像从 BGR 颜色空间转换为 HSV 颜色空间
-    hsv = cv2.cvtColor(screen_in, cv2.COLOR_BGR2HSV)
+    # 避免不必要的完整HSV转换，只提取需要的H通道
+    hsv = cv2.cvtColor(screen_in, cv2.COLOR_RGB2HSV)
 
-    # 定义蓝色的 HSV 范围
-    lower_blue = np.array([90, 38, 120])
-    upper_blue = np.array([165, 130, 240])
-    
+    # 使用更紧凑的蓝色范围
+    mask = cv2.inRange(hsv, np.array([90, 38, 120]), np.array([165, 130, 240]))
 
-    # 创建蓝色的掩码
-    mask = cv2.inRange(hsv, lower_blue, upper_blue)
-
-    # 使用掩码提取蓝色部分
-    blue_extracted = cv2.bitwise_and(screen_in, screen_in, mask=mask)
-
-    return blue_extracted  
+    # 使用更高效的方式应用掩码
+    # 如果只需要掩码区域而不关心颜色可以优化为:
+    # return mask
+    # 否则保留原来的方式:
+    return cv2.bitwise_and(screen_in, screen_in, mask=mask)
 
 def bird_eye_view(img):
-    img_size = (img.shape[1],img.shape[0])
-    bot_width = .70
-    mid_width = .05
-    height_pct = .45
-    bottom_trim= .70   #hood
+    img_size = (img.shape[1], img.shape[0])
 
-    src = np.float32([[img.shape[1]*(0.5-mid_width/2), img.shape[0]*height_pct],
-                      [img.shape[1]*(0.5+mid_width/2),img.shape[0]*height_pct],
-                      [img.shape[1]*(0.5+bot_width/2), img.shape[0]*bottom_trim],
-                      [img.shape[1]*(0.5-bot_width/2), img.shape[0]*bottom_trim]])
-    offset = img_size[0]*0.25
-    dst = np.float32([[offset,0],[img_size[0]-offset,0],[img_size[0]-offset,img_size[1]],[offset,img_size[1]]])   
+    # 预计算这些值，避免重复计算
+    width_half = img.shape[1] * 0.5
+    bot_width_half = img.shape[1] * 0.35  # .70/2
+    mid_width_half = img.shape[1] * 0.025  # .05/2
+    height_pos = img.shape[0] * 0.45
+    bottom_pos = img.shape[0] * 0.70
 
+    src = np.float32(
+        [
+            [width_half - mid_width_half, height_pos],
+            [width_half + mid_width_half, height_pos],
+            [width_half + bot_width_half, bottom_pos],
+            [width_half - bot_width_half, bottom_pos],
+        ]
+    )
 
-    M = cv2.getPerspectiveTransform(src,dst)
+    offset = img_size[0] * 0.25
+    dst = np.float32(
+        [
+            [offset, 0],
+            [img_size[0] - offset, 0],
+            [img_size[0] - offset, img_size[1]],
+            [offset, img_size[1]],
+        ]
+    )
+
+    M = cv2.getPerspectiveTransform(src, dst)
     warped = cv2.warpPerspective(img, M, img_size, flags=cv2.INTER_LINEAR)
 
-    return warped 
+    return warped
+
 
 def bird_view_processing(screen_in, resize_width=160, resize_height=90):
     processed_image = bird_eye_view(screen_in)
-    cv2.imshow('bird_view', cv2.resize(processed_image, (480, 270)))
+    # cv2.imshow('bird_view', cv2.resize(processed_image, (480, 270)))
     processed_image = extract_blue(processed_image)
     processed_image = cv2.cvtColor(processed_image, cv2.COLOR_BGR2GRAY)
     processed_image = cv2.resize(processed_image, (resize_width, resize_height))
@@ -59,32 +71,28 @@ def crop_screen(screen_in, trim_rate=0.3):
 
 
 def edge_processing(screen_in, resize_width=160, resize_height=90):
-    # resize the screen at first to reduce the performance pressure
+    # 一次性调整大小
     screen_resized = cv2.resize(screen_in, (resize_width, resize_height))
-    # screen_resized = extract_blue(screen_resized)
 
-    # apply erode and dilate to remove noise
-    kernel = np.ones((2, 2), np.uint8)
-    # screen_eroded = cv2.erode(screen_resized, kernel, iterations=1)
-    # screen_dilated = cv2.dilate(screen_eroded, kernel, iterations=1)
-
-    # edge detection
+    # 直接进行边缘检测
     edges = cv2.Canny(screen_resized, 200, 255)
-    # edges = cv2.cvtColor(screen_resized, cv2.COLOR_BGR2GRAY)
 
-    # define the ROI axis
-    left_mid = (0, resize_height // 2)
-    right_mid = (resize_width - 1, resize_height // 2)
-    top_mid = (resize_width // 2, 0)
-    bottom_left = (0, resize_height - 1)
-    bottom_right = (resize_width - 1, resize_height - 1)
+    # 预定义ROI坐标
+    roi_corners = np.array(
+        [
+            [
+                (0, resize_height // 2),
+                (resize_width // 2, 0),
+                (resize_width - 1, resize_height // 2),
+                (resize_width - 1, resize_height - 1),
+                (0, resize_height - 1),
+            ]
+        ],
+        dtype=np.int32,
+    )
 
-    # creating mask for masking ROI
-    mask = np.zeros(screen_resized.shape[:2], dtype=np.uint8)
-    roi_corners = np.array([[left_mid, top_mid, right_mid, bottom_right, bottom_left]], dtype=np.int32)
+    # 创建蒙版并应用
+    mask = np.zeros(edges.shape, dtype=np.uint8)
     cv2.fillPoly(mask, roi_corners, 255)
 
-    # apply the ROI mask
-    screen_out = cv2.bitwise_and(edges, edges, mask=mask)
-
-    return screen_out
+    return cv2.bitwise_and(edges, mask)

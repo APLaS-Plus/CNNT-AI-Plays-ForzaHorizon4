@@ -82,23 +82,7 @@ class ImgHelper:
         :return: 灰度图像
         """
         return cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-
-    @staticmethod
-    def apply_threshold(
-        image, threshold=127, max_value=255, threshold_type=cv2.THRESH_BINARY
-    ):
-        """
-        对图像应用阈值处理
-        :param image: 输入图像
-        :param threshold: 阈值
-        :param max_value: 最大值
-        :param threshold_type: 阈值类型
-        :return: 阈值处理后的图像
-        """
-        if len(image.shape) > 2:
-            image = ImgHelper.convert_to_grayscale(image)
-        _, thresholded = cv2.threshold(image, threshold, max_value, threshold_type)
-        return thresholded
+    
 
     @staticmethod
     def draw_rectangle(image, x, y, width, height, color=(0, 255, 0), thickness=2):

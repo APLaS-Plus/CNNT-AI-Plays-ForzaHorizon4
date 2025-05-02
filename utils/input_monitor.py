@@ -12,6 +12,8 @@ VK_W = 0x57
 VK_A = 0x41
 VK_S = 0x53
 VK_D = 0x44
+VK_CONTROL = 0x11
+VK_C = 0x43
 
 
 class XINPUT_GAMEPAD(ctypes.Structure):
@@ -41,6 +43,57 @@ except WindowsError:
         xinput = ctypes.windll.xinput1_3
     except WindowsError:
         xinput = ctypes.windll.xinput9_1_0
+
+
+class KeyboardInterrupt:
+    def __init__(self):
+        self._running = False
+        self._interrupt_flag = False
+        self._monitor_thread = None
+        self._lock = threading.Lock()
+        
+    def start_monitoring(self):
+        """Start monitoring for Ctrl+C key combination"""
+        if self._monitor_thread and self._monitor_thread.is_alive():
+            return
+            
+        self._running = True
+        self._interrupt_flag = False
+        self._monitor_thread = threading.Thread(target=self._monitor_keys)
+        self._monitor_thread.daemon = True
+        self._monitor_thread.start()
+        
+    def stop_monitoring(self):
+        """Stop monitoring"""
+        self._running = False
+        if self._monitor_thread and self._monitor_thread.is_alive():
+            self._monitor_thread.join(timeout=1.0)
+            
+    def _monitor_keys(self):
+        """Thread function to monitor Ctrl+C key combination"""
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        GetAsyncKeyState = user32.GetAsyncKeyState
+        
+        while self._running:
+            # Check if both Ctrl and C are pressed
+            ctrl_pressed = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0
+            c_pressed = (GetAsyncKeyState(VK_C) & 0x8000) != 0
+            
+            if ctrl_pressed and c_pressed:
+                with self._lock:
+                    self._interrupt_flag = True
+                    
+            time.sleep(0.1)  # 100ms polling interval
+            
+    def is_interrupted(self):
+        """Check if Ctrl+C was detected"""
+        with self._lock:
+            return self._interrupt_flag
+            
+    def reset(self):
+        """Reset the interrupt flag"""
+        with self._lock:
+            self._interrupt_flag = False
 
 
 class InputMonitor:
