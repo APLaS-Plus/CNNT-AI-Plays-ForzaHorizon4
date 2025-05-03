@@ -28,20 +28,20 @@ class ConvBlock(nn.Module):
 
 
 class PositionalEncoding2D(nn.Module):
-    """2D位置编码，为每个空间位置添加唯一的编码"""
+    """2D positional encoding, adds a unique encoding to each spatial position"""
 
     def __init__(self, d_model, height, width):
         super().__init__()
         self.d_model = d_model
 
-        # 创建一个常量位置编码
+        # Create a constant positional encoding
         pe = torch.zeros(d_model, height, width)
-        # 计算位置编码
+        # Calculate position encodings
         div_term = torch.exp(
             torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model)
         )
 
-        # 对height维度进行编码
+        # Encode height dimension
         for h in range(height):
             pe[0::2, h, :] = pe[0::2, h, :] + torch.sin(h * div_term).unsqueeze(
                 1
@@ -50,7 +50,7 @@ class PositionalEncoding2D(nn.Module):
                 1
             ).expand(-1, width)
 
-        # 对width维度进行编码
+        # Encode width dimension
         for w in range(width):
             pe[0::2, :, w] = pe[0::2, :, w] + torch.sin(w * div_term).unsqueeze(
                 1
@@ -59,11 +59,11 @@ class PositionalEncoding2D(nn.Module):
                 1
             ).expand(-1, height)
 
-        # 注册为buffer而不是参数
+        # Register as buffer instead of parameter
         self.register_buffer("pe", pe.unsqueeze(0))  # [1, d_model, height, width]
 
     def forward(self, x):
-        # x形状: [batch_size, d_model, height, width]
+        # x shape: [batch_size, d_model, height, width]
         return x + self.pe
 
 

@@ -11,20 +11,22 @@ sys.path.append(UTILS_DIR)
 from utils.input_monitor import InputMonitor
 
 
-# Usage example
+# Usage example: Monitor controller inputs and convert to driving commands
 if __name__ == "__main__":
     monitor = InputMonitor()
-    # Choose to monitor controller or keyboard
+    # Initialize controller monitoring
     monitor.start_controller_monitoring()
 
     try:
         while True:
+            # Get raw controller state
             controller_state = monitor.get_controller_state()
             print(
                 f"Left Thumbstick X: {controller_state['left_thumb_x']:.2f}, "
                 f"Left Trigger: {controller_state['left_trigger']:.2f}, Right Trigger: {controller_state['right_trigger']:.2f}"
             )
             time.sleep(0.1)
+            # Get processed driving controls
             combined_controller_state = monitor.get_combined_state()
             print(
                 f"Combined - Turning: {combined_controller_state['turning']:.2f}, "

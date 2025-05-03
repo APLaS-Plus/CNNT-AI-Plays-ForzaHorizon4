@@ -71,11 +71,11 @@ def main():
 
     # 计算三位数的值
     numeric_value = 100 * digits_prediction[0] + 10 * digits_prediction[1] + digits_prediction[2]
-    print(f"预测的数字组合值为: {numeric_value}")
+    print(f"Predicted combined digit value: {numeric_value}")
 
     ed = time.time()
     print("Total execution time:", ed - bg)
-    # 显示捕获的数字区域
+    # Display the captured digit region
     plt.figure(figsize=(8, 4))
     plt.subplot(1, 2, 1)
     plt.imshow(img, cmap="gray")

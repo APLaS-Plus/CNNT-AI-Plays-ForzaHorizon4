@@ -8,31 +8,31 @@ from PIL import ImageGrab
 
 class ImgHelper:
     """
-    基于OpenCV的截屏功能类，用于获取和处理屏幕截图。
-    该类不包含初始化函数。
+    OpenCV-based screenshot utility class for capturing and processing screen images.
+    This class does not contain an initialization function.
     """
 
     @staticmethod
     def capture_screen():
         """
-        捕获整个屏幕的截图
-        :return: numpy数组格式的截图
+        Capture screenshot of the entire screen
+        :return: screenshot as numpy array
         """
         screenshot = ImageGrab.grab()
         screenshot = np.array(screenshot)
-        # 将BGR格式转换为RGB格式
+        # Convert from BGR to RGB format
         screenshot = cv2.cvtColor(screenshot, cv2.COLOR_BGR2RGB)
         return screenshot
 
     @staticmethod
     def capture_screen_region(x, y, width, height):
         """
-        捕获屏幕的特定区域
-        :param x: 区域左上角的x坐标
-        :param y: 区域左上角的y坐标
-        :param width: 区域宽度
-        :param height: 区域高度
-        :return: numpy数组格式的截图
+        Capture a specific region of the screen
+        :param x: x-coordinate of the top-left corner
+        :param y: y-coordinate of the top-left corner
+        :param width: width of the region
+        :param height: height of the region
+        :return: screenshot as numpy array
         """
         screenshot = ImageGrab.grab(bbox=(x, y, x + width, y + height))
         screenshot = np.array(screenshot)
@@ -43,43 +43,43 @@ class ImgHelper:
     @staticmethod
     def capture_region(image, x, y, width, height):
         """
-        使用cv2.getRectSubPix从图像中裁剪特定区域
-        :param image: 输入的图像（numpy数组）
-        :param x: 区域左上角的x坐标
-        :param y: 区域左上角的y坐标
-        :param width: 区域宽度
-        :param height: 区域高度
-        :return: 裁剪后的图像区域
+        Crop a specific region from an image using cv2.getRectSubPix
+        :param image: input image (numpy array)
+        :param x: x-coordinate of the top-left corner
+        :param y: y-coordinate of the top-left corner
+        :param width: width of the region
+        :param height: height of the region
+        :return: cropped image region
         """
-        # 确保坐标和尺寸有效
+        # Ensure valid coordinates and dimensions
         img_height, img_width = image.shape[:2]
         x = max(0, min(x, img_width - 1))
         y = max(0, min(y, img_height - 1))
         width = max(1, min(width, img_width - x))
         height = max(1, min(height, img_height - y))
 
-        # 计算中心点
+        # Calculate center point
         center_x = x + width / 2
         center_y = y + height / 2
 
-        # 使用cv2.getRectSubPix获取子图像
+        # Get sub-image using cv2.getRectSubPix
         return cv2.getRectSubPix(image, (int(width), int(height)), (center_x, center_y))
 
     @staticmethod
     def save_screenshot(image, filename):
         """
-        保存截图到文件
-        :param image: numpy数组格式的截图
-        :param filename: 保存的文件名
+        Save screenshot to file
+        :param image: screenshot as numpy array
+        :param filename: filename to save to
         """
         cv2.imwrite(filename, cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
 
     @staticmethod
     def convert_to_grayscale(image):
         """
-        将图像转换为灰度
-        :param image: 彩色图像
-        :return: 灰度图像
+        Convert image to grayscale
+        :param image: color image
+        :return: grayscale image
         """
         return cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
     
@@ -87,15 +87,15 @@ class ImgHelper:
     @staticmethod
     def draw_rectangle(image, x, y, width, height, color=(0, 255, 0), thickness=2):
         """
-        在图像上绘制矩形
-        :param image: 要绘制的图像
-        :param x: 左上角x坐标
-        :param y: 左上角y坐标
-        :param width: 宽度
-        :param height: 高度
-        :param color: 颜色，默认为绿色
-        :param thickness: 线条粗细
-        :return: 绘制了矩形的图像
+        Draw a rectangle on the image
+        :param image: image to draw on
+        :param x: x-coordinate of the top-left corner
+        :param y: y-coordinate of the top-left corner
+        :param width: width of the rectangle
+        :param height: height of the rectangle
+        :param color: color (default is green)
+        :param thickness: line thickness
+        :return: image with rectangle drawn
         """
         result = image.copy()
         cv2.rectangle(result, (x, y), (x + width, y + height), color, thickness)
@@ -109,32 +109,33 @@ class ImgHelper:
     @staticmethod
     def warp_perspective(image, points, target_width, target_height):
         """
-        将任意四边形的图片区域拉伸成指定大小的矩形
+        Stretch any quadrilateral image region into a rectangle of specified size
 
-        :param image: 输入图像
-        :param points: 原图中四边形的四个顶点坐标，格式为[(x1,y1), (x2,y2), (x3,y3), (x4,y4)]
-                      顶点顺序应为：左上、右上、右下、左下
-        :param target_width: 目标矩形的宽度
-        :param target_height: 目标矩形的高度
-        :return: 拉伸后的矩形图像
+        :param image: input image
+        :param points: four corner points of the quadrilateral in the original image,
+                      format [(x1,y1), (x2,y2), (x3,y3), (x4,y4)]
+                      points should be ordered: top-left, top-right, bottom-right, bottom-left
+        :param target_width: width of the target rectangle
+        :param target_height: height of the target rectangle
+        :return: warped rectangular image
         """
-        # 确保点是按照左上、右上、右下、左下的顺序排列
+        # Ensure points are in order: top-left, top-right, bottom-right, bottom-left
         src = np.float32(points)
 
-        # 定义目标矩形的四个顶点坐标
+        # Define the four corner points of the target rectangle
         dst = np.float32(
             [
-                [0, 0],  # 左上
-                [target_width - 1, 0],  # 右上
-                [target_width - 1, target_height - 1],  # 右下
-                [0, target_height - 1],  # 左下
+                [0, 0],  # top-left
+                [target_width - 1, 0],  # top-right
+                [target_width - 1, target_height - 1],  # bottom-right
+                [0, target_height - 1],  # bottom-left
             ]
         )
 
-        # 计算透视变换矩阵
+        # Calculate perspective transformation matrix
         matrix = cv2.getPerspectiveTransform(src, dst)
 
-        # 应用透视变换
+        # Apply perspective transformation
         result = cv2.warpPerspective(image, matrix, (target_width, target_height))
 
         return result

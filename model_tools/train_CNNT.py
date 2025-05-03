@@ -138,7 +138,7 @@ def train(
         train_accel_loss = 0.0
 
         optimizer.zero_grad()
-        
+
         progress_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs} [Train]")
         for images, labels, speeds in progress_bar:
             batch_size, seq_len = images.shape[0], images.shape[1]
@@ -229,6 +229,8 @@ def train(
                 batch_size, seq_len = images.shape[0], images.shape[1]
 
                 # Initialize memory for sequence processing
+                frame_queue = None
+                speed_queue = None
                 memory_queue = None
 
                 # Process each frame in the sequence
@@ -241,8 +243,15 @@ def train(
                     current_speed = speeds[:, t].to(device)
 
                     # Forward pass
-                    steering, acceleration, new_memory = model(
-                        current_frame, current_speed, memory_queue, device=device
+                    steering, acceleration, new_memory, frame_queue, speed_queue = (
+                        model(
+                            frame_queue,
+                            speed_queue,
+                            current_frame,
+                            current_speed,
+                            memory_queue,
+                            device=device,
+                        )
                     )
 
                     # Update memory for next frame

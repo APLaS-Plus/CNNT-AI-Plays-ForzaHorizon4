@@ -2,6 +2,8 @@ from .capture_processing import ImgHelper
 from .vendor import cv_img_processing as cv_img_processing
 from .vendor import grabscreen
 import cv2
+
+
 class CaptureGuideline:
     def __init__(self):
         self.grabber = grabscreen.ScreenGrabber()
@@ -12,7 +14,9 @@ class CaptureGuideline:
     def get_bule_bird_eye_view(self, frame):
         bird_eye_view = cv_img_processing.bird_eye_view(frame)
         resized_bird_eye_view = cv2.resize(bird_eye_view, (240, 136))
-        blue_img = cv_img_processing.extract_blue(cv2.cvtColor(resized_bird_eye_view, cv2.COLOR_BGR2RGB))
+        blue_img = cv_img_processing.extract_blue(
+            cv2.cvtColor(resized_bird_eye_view, cv2.COLOR_BGR2RGB)
+        )
         return blue_img
 
     def get_currunt_key_region(self):
@@ -25,4 +29,3 @@ class CaptureGuideline:
     def get_frame(self):
         frame = self.grabber.grab()
         return frame
-    

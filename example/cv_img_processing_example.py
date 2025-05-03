@@ -18,19 +18,18 @@ from utils.vendor.cv_img_processing import (
 
 TEST_PNG = ROOT_DIR / ".." / "testpng" / "night.jpg"
 
+# Load test image
 img = cv2.imread(str(TEST_PNG), cv2.IMREAD_COLOR_RGB)
 showimg = Image.fromarray(img)
 showimg.show()
 
-# enhance_img = enhance_image(img)
-# showimg = Image.fromarray(enhance_img)
-
-# cropped_screen = crop_screen(img)
+# Apply bird eye view transformation
 bird_view = bird_eye_view(img)
 
 showimg = Image.fromarray(bird_view)
 showimg.show()
 
+# Extract blue features from the bird eye view
 bule_img = extract_blue(bird_view)
 # resized_image = bird_view_processing(img)
 

@@ -32,13 +32,13 @@ if __name__ == "__main__":
         controller.set_controls(right_trigger=value)
         time.sleep(0.01)
 
-    # Test left stick x-axis
+    # Test left stick x-axis (turn left)
     for value in left_stick_x_array:
         # print(f"Left Stick X Value: {value}")
         controller.set_controls(left_stick_x=value)
         time.sleep(0.01)
 
-    # Test left stick x-axis (reverse direction)
+    # Test left stick x-axis (turn right)
     for value in left_stick_x_array2:
         # print(f"Left Stick X Value (Reverse): {value}")
         controller.set_controls(left_stick_x=value)

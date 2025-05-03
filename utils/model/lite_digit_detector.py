@@ -5,11 +5,11 @@ import torchvision.transforms as transforms
 
 
 class ConvBlock(nn.Module):
-    """轻量级卷积块，用于特征提取"""
+    """Lightweight convolutional block for feature extraction"""
 
     def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, padding=1):
         super(ConvBlock, self).__init__()
-        # 使用分组卷积来减少参数量
+        # Use grouped convolution to reduce the number of parameters
         self.conv = nn.Conv2d(
             in_channels,
             out_channels,
@@ -31,14 +31,14 @@ class ConvBlock(nn.Module):
 
 
 class DigitClassifier(nn.Module):
-    """单个数字的分类头"""
+    """Classification head for a single digit"""
 
     def __init__(self, in_features, num_classes=10):
         super(DigitClassifier, self).__init__()
-        # 减小隐藏层的神经元数量
-        self.fc1 = nn.Linear(in_features, 32)  # 从64减少到32
+        # Reduce hidden layer neurons to optimize model size
+        self.fc1 = nn.Linear(in_features, 32)  # Reduced from 64 to 32
         self.fc2 = nn.Linear(32, num_classes)
-        self.dropout = nn.Dropout(0.2)  # 减小dropout概率以提高轻量模型的表达能力
+        self.dropout = nn.Dropout(0.2)  # Lower dropout rate to improve lightweight model's expressiveness
 
     def forward(self, x):
         x = F.relu(self.fc1(x))
@@ -48,15 +48,15 @@ class DigitClassifier(nn.Module):
 
 
 class LiteDigitDetector(nn.Module):
-    """轻量级数字识别模型，可以识别三个固定位置的数字"""
+    """Lightweight digit recognition model capable of recognizing three fixed-position digits"""
 
     def __init__(
         self, input_height=48, input_width=80
     ):
         super(LiteDigitDetector, self).__init__()
-        # 输入图像预期是灰度图，如果是彩色图，会在forward中处理
+        # Input image is expected to be grayscale; if it's colored, it will be processed in forward
 
-        # 更轻量化的特征提取网络
+        # More lightweight feature extraction network
         self.features = nn.Sequential(
             ConvBlock(1, 8),
             ConvBlock(8, 16),
@@ -64,70 +64,70 @@ class LiteDigitDetector(nn.Module):
             nn.Conv2d(32, 32, kernel_size=2)
         )
 
-        # 计算特征提取后的特征图尺寸
+        # Calculate feature map dimensions after feature extraction
         feature_height = input_height // 8 - 1
         feature_width = input_width // 8 - 1
 
-        # 三个数字在水平方向均匀分布，我们可以将特征图划分为三部分
+        # Three digits are evenly distributed horizontally; we can divide the feature map into three parts
         self.digit_width = feature_width // 3
         self.flatten_features = (
             self.digit_width * feature_height * 32
-        )  # 最后一层通道数是32而不是64
+        )  # The last layer channel count is 32 instead of 64
 
-        # 打印确认特征维度
+        # Print to confirm feature dimensions
         print(
             f"Feature dimensions: {feature_height}x{feature_width}, digit_width: {self.digit_width}"
         )
         print(f"Flattened features: {self.flatten_features}")
 
-        # 三个数字位置的分类器
+        # Classifiers for three digit positions
         self.digit_classifier1 = DigitClassifier(self.flatten_features)
         self.digit_classifier2 = DigitClassifier(self.flatten_features)
         self.digit_classifier3 = DigitClassifier(self.flatten_features)
 
-        # 图像预处理
+        # Image preprocessing
         self.transform = transforms.Compose(
             [
                 transforms.Grayscale(),
                 transforms.Resize(
                     (input_height, input_width)
-                ),  # 保持原始比例的缩小尺寸
+                ),  # Resize while maintaining original aspect ratio
                 transforms.ToTensor(),
                 transforms.Normalize((0.5,), (0.5,)),
             ]
         )
 
     def preprocess(self, image):
-        """预处理输入图像"""
+        """Preprocess input image"""
         if isinstance(image, torch.Tensor):
-            # 如果已经是tensor，检查通道数
-            if image.dim() == 4 and image.size(1) == 3:  # NCHW格式，3通道
+            # If already a tensor, check the number of channels
+            if image.dim() == 4 and image.size(1) == 3:  # NCHW format, 3 channels
                 image = transforms.Grayscale()(image)
-            elif image.dim() == 3 and image.size(0) == 3:  # CHW格式，3通道
+            elif image.dim() == 3 and image.size(0) == 3:  # CHW format, 3 channels
                 image = transforms.Grayscale()(image.unsqueeze(0)).squeeze(0)
-            # 归一化
+            # Normalize
             if image.max() > 1.0:
                 image = image / 255.0
             image = transforms.Normalize((0.5,), (0.5,))(image)
         else:
-            # 如果是PIL图像或其他格式
+            # If it's a PIL image or other format
             image = self.transform(image)
 
         return image
 
     def forward(self, x):
-        """前向传播，返回三个位置的数字预测"""
-        # 确保输入是灰度图
+        """Forward pass, returns predictions for three digit positions"""
+        # Ensure input is grayscale
         if x.dim() == 4 and x.size(1) == 3:  # Batch of RGB images
-            x = torch.mean(x, dim=1, keepdim=True)  # 简单地转为灰度
+            x = torch.mean(x, dim=1, keepdim=True)  # Convert to grayscale
         elif x.dim() == 3 and x.size(0) == 3:  # Single RGB image
             x = torch.mean(x, dim=0, keepdim=True).unsqueeze(0)
 
-        # 特征提取
+        # Feature extraction
         features = self.features(x)
         batch_size = features.size(0)
 
-        # 根据位置分割特征图
+        # Split feature map by position
         digit1_features = features[:, :, :, : self.digit_width].reshape(batch_size, -1)
         digit2_features = features[
             :, :, :, self.digit_width : 2 * self.digit_width
@@ -136,7 +136,7 @@ class LiteDigitDetector(nn.Module):
             batch_size, -1
         )
 
-        # 对每个位置的数字进行分类
+        # Classify digits at each position
         digit1_pred = self.digit_classifier1(digit1_features)
         digit2_pred = self.digit_classifier2(digit2_features)
         digit3_pred = self.digit_classifier3(digit3_features)
@@ -144,18 +144,18 @@ class LiteDigitDetector(nn.Module):
         return digit1_pred, digit2_pred, digit3_pred
 
     def predict(self, image):
-        """预测图像中三个位置的数字"""
-        # 预处理
+        """Predict three digits in the image"""
+        # Preprocess
         processed_image = self.preprocess(image)
-        if processed_image.dim() == 3:  # 单张图片
+        if processed_image.dim() == 3:  # Single image
             processed_image = processed_image.unsqueeze(0)
 
-        # 推理
+        # Inference
         self.eval()
         with torch.no_grad():
             digit1_logits, digit2_logits, digit3_logits = self(processed_image)
 
-        # 获取预测结果
+        # Get prediction results
         digit1 = digit1_logits.argmax(dim=1)
         digit2 = digit2_logits.argmax(dim=1)
         digit3 = digit3_logits.argmax(dim=1)
@@ -163,9 +163,9 @@ class LiteDigitDetector(nn.Module):
         return digit1.item(), digit2.item(), digit3.item()
 
     def save_weights(self, path):
-        """保存模型权重"""
+        """Save model weights"""
         torch.save(self.state_dict(), path)
 
     def load_weights(self, path):
-        """加载模型权重"""
+        """Load model weights"""
         self.load_state_dict(torch.load(path))
