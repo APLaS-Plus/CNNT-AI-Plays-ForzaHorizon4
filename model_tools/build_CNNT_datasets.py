@@ -46,10 +46,10 @@ def main(cgl, monitor, keyboardmonitor, RAW_DATA_DIR):
         # get digit region and blue bird eye view
         begin_of_get_frame = time.time()
         digit_region, blue_bird_eye_view = cgl.get_currunt_key_region()
-        cv2.imshow("digit_region", digit_region)
-        cv2.imshow("blue_bird_eye_view", blue_bird_eye_view)
-        if cv2.waitKey(1) & 0xFF == ord("q"):
-            break
+        # cv2.imshow("digit_region", digit_region)
+        # cv2.imshow("blue_bird_eye_view", blue_bird_eye_view)
+        # if cv2.waitKey(1) & 0xFF == ord("q"):
+        #     break
 
         # get contorl state
         controller_state = monitor.get_combined_state()
@@ -123,7 +123,8 @@ def main(cgl, monitor, keyboardmonitor, RAW_DATA_DIR):
         else:
             shutil.move(str(RAW_DATA_DIR / image), str(val_path / image))
             shutil.move(str(RAW_DATA_DIR / image.replace('.jpg', '.txt')), str(val_path / image.replace('.jpg', '.txt')))
-    
+            
+    print(f"Stopping... You have been playing for {frame_label * 0.05:.2f} seconds")
 
 
 if __name__ == "__main__":
