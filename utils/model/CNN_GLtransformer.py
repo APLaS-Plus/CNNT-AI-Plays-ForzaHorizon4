@@ -157,8 +157,11 @@ class TransformerBlock(nn.Module):
         )
         self.dropout = nn.Dropout(dropout_rate)
         self.decoder = nn.Sequential(
-            nn.Linear(embed_dim, 2),
-            nn.Hardtanh(min_val=-1.0, max_val=1.0),
+            nn.Linear(embed_dim * 16, 128),
+            nn.LayerNorm(128),
+            nn.GELU(),
+            nn.Linear(128, 2),
+            nn.Tanh(),
         )
 
     def forward(self, input, memory_size=160):
@@ -189,7 +192,11 @@ class TransformerBlock(nn.Module):
             :, :memory_size, :
         ]  # use to combine the new frame queue
         # print(f"new_memory_queue: {new_memory_queue.shape}")
-        output = self.decoder(g_l_concat[:, -1, :])
+        last_16_tokens = g_l_concat[:, -16:, :]  # [batch_size, 16, 65]
+        last_16_tokens_flat = last_16_tokens.reshape(
+            last_16_tokens.size(0), -1
+        )  # [batch_size, 16*65]
+        output = self.decoder(last_16_tokens_flat)
         steering = output[:, 0]
         acceleration = output[:, 1]
 

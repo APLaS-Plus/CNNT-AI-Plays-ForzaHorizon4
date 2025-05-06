@@ -59,13 +59,13 @@ class ControllerOutput:
         """
         with self.lock:
             if left_stick_x is not None:
-                self.controls['left_stick_x'] = max(-1.0, min(1.0, left_stick_x))
+                self.controls['left_stick_x'] = left_stick_x
 
             if left_trigger is not None:
-                self.controls['left_trigger'] = max(0.0, min(1.0, left_trigger))
+                self.controls['left_trigger'] = left_trigger
 
             if right_trigger is not None:
-                self.controls['right_trigger'] = max(0.0, min(1.0, right_trigger))
+                self.controls['right_trigger'] = right_trigger
 
     def _update_loop(self):
         """The main loop that updates controller state in a separate thread"""

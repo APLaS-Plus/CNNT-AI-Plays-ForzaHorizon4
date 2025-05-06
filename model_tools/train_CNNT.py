@@ -59,7 +59,7 @@ class CNNTDataset(Dataset):
             )  # Sort numerically by filename
 
             # Add path prefix to each file
-            img_files = [os.path.join(data_dir, f) for f in img_files]
+            img_files = [os.path.join(data_dir, f) for f in img_files[::2]]
             self.image_files.extend(img_files)
 
         # Group images into sequences
@@ -129,6 +129,10 @@ def train(
         "val_accel_loss": [],
     }
     torch.autograd.set_detect_anomaly(True)
+
+    # Early stopping parameters
+    patience = 10
+    counter = 0
 
     for epoch in range(num_epochs):
         # Training phase
@@ -298,6 +302,19 @@ def train(
             best_val_loss = val_loss
             torch.save(model.state_dict(), str(model_save_path / "best_cnnt_model.pth"))
             print(f"Model saved with validation loss: {val_loss:.4f}")
+            # Reset early stopping counter
+            counter = 0
+        else:
+            # Validation loss did not improve, increment counter
+            counter += 1
+            print(f"EarlyStopping counter: {counter} out of {patience}")
+            if counter >= patience:
+                print(
+                    "Early stopping: Validation loss didn't improve for {} epochs".format(
+                        patience
+                    )
+                )
+                break
 
         # Record history
         history["train_loss"].append(train_loss)
@@ -405,7 +422,7 @@ if __name__ == "__main__":
 
     # Define loss function and optimizer
     criterion = nn.MSELoss()
-    optimizer = optim.Adam(model.parameters(), lr=0.0005)
+    optimizer = optim.Adam(model.parameters(), lr=0.00005)
 
     # Check CUDA availability
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")

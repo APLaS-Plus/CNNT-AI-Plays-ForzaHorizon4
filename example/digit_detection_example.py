@@ -41,36 +41,61 @@ def main():
 
     # Set model to evaluation mode
     model.eval()
-    
+
     load_model = time.time()
     print("Model loading time:", load_model - bg)
-    
+
     # 2. Load test image
-    image_path = ROOT_DIR / ".." / "testpng" / "night.jpg"  # Modify to your test image path
+    image_path = (
+        ROOT_DIR / ".." / "testpng" / "night.jpg"
+    )  # Modify to your test image path
     img = cv2.imread(str(image_path))
     img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    digit_region = ImgHelper.capture_digit_region(img)  # Crop the digit region from the image
+    digit_region = ImgHelper.capture_digit_region(
+        img
+    )  # Crop the digit region from the image
 
     if digit_region is None:
         print("Error: Could not capture digit region")
         return
 
-    # 转换为PIL图像以便模型预测
-    pil_image = Image.fromarray(digit_region)
+    # Apply image preprocessing steps
+    # Apply median filter to remove noise
+    median = cv2.medianBlur(digit_region, 3)
+
+    # Apply CLAHE (Contrast Limited Adaptive Histogram Equalization)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    enhanced = clahe.apply(median)
+
+    # Apply adaptive thresholding
+    binary = cv2.adaptiveThreshold(
+        enhanced, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY, 15, 5
+    )
+
+    # Morphological operations to enhance character contours
+    kernel = np.ones((2, 2), np.uint8)
+    morph = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+
+    # Convert processed image to PIL format
+    pil_image = Image.fromarray(morph)
 
     load_pil_image = time.time()
     print("PIL image loading time:", load_pil_image - load_model)
-    
+
     # 3. Make prediction
     bg_predict = time.time()
     digits_prediction = predict_with_model(model, pil_image)
     predict_img = time.time()
     print("Prediction time:", predict_img - bg_predict)
-    print(f"预测的三个数字分别是: {digits_prediction}")
-    print(f"预测的数字组合值为: {digits_prediction[0] * 100 + digits_prediction[1] * 10 + digits_prediction[2]}")
+    print(f"Predicted three digits: {digits_prediction}")
+    print(
+        f"Combined digit value: {digits_prediction[0] * 100 + digits_prediction[1] * 10 + digits_prediction[2]}"
+    )
 
-    # 计算三位数的值
-    numeric_value = 100 * digits_prediction[0] + 10 * digits_prediction[1] + digits_prediction[2]
+    # Calculate the value of the three-digit number
+    numeric_value = (
+        100 * digits_prediction[0] + 10 * digits_prediction[1] + digits_prediction[2]
+    )
     print(f"Predicted combined digit value: {numeric_value}")
 
     ed = time.time()
@@ -85,6 +110,7 @@ def main():
     plt.title("Captured Digit Region")
     plt.tight_layout()
     plt.show()
+
 
 if __name__ == "__main__":
     main()

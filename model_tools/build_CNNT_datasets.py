@@ -4,6 +4,7 @@ import time
 import shutil
 import cv2
 import os
+import numpy as np
 from PIL import Image
 ROOT_DIR = pathlib.Path(__file__).resolve().parent.parent
 
@@ -99,8 +100,28 @@ def main(cgl, monitor, keyboardmonitor, RAW_DATA_DIR):
     for digit in digits:
         print(f"Processing {digit}...")
         img = cv2.imread(digit)
+        # Convert to grayscale
         img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        pil_img = Image.fromarray(img)
+
+        # Apply median filter to remove noise
+        median = cv2.medianBlur(img, 3)
+
+        # Apply CLAHE (Contrast Limited Adaptive Histogram Equalization)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        enhanced = clahe.apply(median)
+
+        # Apply adaptive thresholding
+        binary = cv2.adaptiveThreshold(
+            enhanced, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY, 15, 5
+        )
+
+        # Morphological operations to enhance character contours
+        kernel = np.ones((2, 2), np.uint8)
+        morph = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+
+        # Convert processed image to PIL format
+        pil_img = Image.fromarray(morph)
+
         digit_value = lite_digit_detector.predict(pil_img)
         digit_value = digit_value[0] * 100 + digit_value[1] * 10 + digit_value[2]
         with open(digit.replace("digit_data", "").replace(".jpg", ".txt"), "a") as f:
@@ -123,7 +144,7 @@ def main(cgl, monitor, keyboardmonitor, RAW_DATA_DIR):
         else:
             shutil.move(str(RAW_DATA_DIR / image), str(val_path / image))
             shutil.move(str(RAW_DATA_DIR / image.replace('.jpg', '.txt')), str(val_path / image.replace('.jpg', '.txt')))
-            
+
     print(f"Stopping... You have been playing for {frame_label * 0.05:.2f} seconds")
 
 

@@ -9,6 +9,7 @@ from torchvision import transforms
 from PIL import Image
 import numpy as np
 import matplotlib.pyplot as plt
+import cv2  # Added cv2 import
 
 ROOT_DIR = pathlib.Path(__file__).parent.resolve()
 UTILS_DIR = ROOT_DIR / ".."
@@ -73,7 +74,31 @@ class DigitDataset(Dataset):
 
     def __getitem__(self, idx):
         img_path = os.path.join(self.root_dir, self.image_files[idx])
-        image = Image.open(img_path).convert("L")  # Convert to grayscale
+
+        # Use OpenCV to read and preprocess the image
+        img = cv2.imread(img_path)
+
+        # Convert to grayscale
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+        # Apply median filter to remove noise
+        median = cv2.medianBlur(gray, 3)
+
+        # Apply CLAHE (Contrast Limited Adaptive Histogram Equalization)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        enhanced = clahe.apply(median)
+
+        # Apply adaptive thresholding
+        binary = cv2.adaptiveThreshold(
+            enhanced, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY, 15, 5
+        )
+
+        # Morphological operations to enhance character contours
+        kernel = np.ones((2, 2), np.uint8)
+        morph = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+
+        # Convert processed image to PIL format
+        image = Image.fromarray(morph)
 
         # Get label
         label = self.labels[idx]
@@ -85,7 +110,14 @@ class DigitDataset(Dataset):
 
 
 def train(
-    model, train_loader, val_loader, criterion, optimizer, num_epochs=10, device="cuda", model_save_path=None
+    model,
+    train_loader,
+    val_loader,
+    criterion,
+    optimizer,
+    num_epochs=10,
+    device="cuda",
+    model_save_path=None,
 ):
     """
     Model training function
@@ -179,7 +211,9 @@ def train(
         # Save best model
         if val_acc > best_val_acc:
             best_val_acc = val_acc
-            torch.save(model.state_dict(), str(model_save_path / "best_digit_model.pth"))
+            torch.save(
+                model.state_dict(), str(model_save_path / "best_digit_model.pth")
+            )
 
         # Record history
         history["train_loss"].append(train_loss)
@@ -228,7 +262,6 @@ if __name__ == "__main__":
     torch.manual_seed(42)
     np.random.seed(42)
 
-    
     # Define dataset path
     data_dir = ROOT_DIR / ".." / "dataset" / "digit"  # Modify to your dataset path
     data_dir = str(data_dir.resolve())
@@ -236,7 +269,7 @@ if __name__ == "__main__":
 
     if not os.path.exists(model_save_path):
         os.makedirs(model_save_path)
-    
+
     # Define image transformations - updated to use the optimized image size
     transform = transforms.Compose(
         [
@@ -250,8 +283,8 @@ if __name__ == "__main__":
     train_dataset = DigitDataset(data_dir, transform=transform, split="train")
     val_dataset = DigitDataset(data_dir, transform=transform, split="val")
 
-    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=4)
-    val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False, num_workers=4)
+    train_loader = DataLoader(train_dataset, batch_size=80, shuffle=True, num_workers=4)
+    val_loader = DataLoader(val_dataset, batch_size=80, shuffle=False, num_workers=4)
 
     # Print dataset info
     print(f"Training set size: {len(train_dataset)}")
@@ -277,7 +310,7 @@ if __name__ == "__main__":
         val_loader,
         criterion,
         optimizer,
-        num_epochs=30,
+        num_epochs=50,
         device=device,
         model_save_path=model_save_path,
     )
