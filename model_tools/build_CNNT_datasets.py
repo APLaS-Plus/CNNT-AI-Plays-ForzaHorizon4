@@ -6,6 +6,7 @@ import cv2
 import os
 import numpy as np
 from PIL import Image
+
 ROOT_DIR = pathlib.Path(__file__).resolve().parent.parent
 
 UTILS_DIR = ROOT_DIR
@@ -17,6 +18,80 @@ from utils.input_monitor import InputMonitor, KeyboardInterrupt
 from utils.model.lite_digit_detector import LiteDigitDetector
 
 RAW_DATA_DIR = ROOT_DIR / "raw_data" / "CNNT"
+
+
+def augment_dataset(data_dir):
+    """
+    Augment the dataset by horizontal flipping the images and inverting the steering values
+
+    Args:
+        data_dir: Original dataset directory
+    """
+    print(f"Starting dataset augmentation with horizontal flipping...")
+
+    # Create directory for augmented dataset
+    augmented_data_dir = data_dir.parent / f"{data_dir.name}_augmented"
+    if not augmented_data_dir.exists():
+        augmented_data_dir.mkdir(parents=True, exist_ok=True)
+
+    # Create train and validation subdirectories for augmented data
+    aug_train_path = augmented_data_dir / "train"
+    aug_val_path = augmented_data_dir / "val"
+    aug_train_path.mkdir(parents=True, exist_ok=True)
+    aug_val_path.mkdir(parents=True, exist_ok=True)
+
+    # Process training set
+    train_path = data_dir / "train"
+    _process_folder(train_path, aug_train_path)
+
+    # Process validation set
+    val_path = data_dir / "val"
+    _process_folder(val_path, aug_val_path)
+
+    print(
+        f"Data augmentation completed! Augmented dataset saved to: {augmented_data_dir}"
+    )
+    return augmented_data_dir
+
+
+def _process_folder(src_folder, dst_folder):
+    """Process a single folder for data augmentation"""
+    images = [i for i in os.listdir(src_folder) if i.endswith(".jpg")]
+
+    for img_name in images:
+        txt_name = img_name.replace(".jpg", ".txt")
+        img_path = src_folder / img_name
+        txt_path = src_folder / txt_name
+
+        # Read the original image and flip horizontally
+        img = cv2.imread(str(img_path))
+        flipped_img = cv2.flip(img, 1)  # 1 means horizontal flip
+
+        # Read the original label file
+        with open(txt_path, "r") as f:
+            content = f.read().strip().split()
+            # Invert the steering value (first float)
+            turning_value = float(content[0])
+            acceleration_value = float(content[1])
+            speed_value = content[2] if len(content) > 2 else None
+
+            # Invert steering value
+            flipped_turning = -turning_value
+
+        # Save the flipped image
+        flipped_img_path = dst_folder / img_name
+        cv2.imwrite(str(flipped_img_path), flipped_img)
+
+        # Save the modified label
+        flipped_txt_path = dst_folder / txt_name
+        with open(flipped_txt_path, "w") as f:
+            if speed_value:
+                f.write(f"{flipped_turning:.2f} {acceleration_value:.2f} {speed_value}")
+            else:
+                f.write(f"{flipped_turning:.2f} {acceleration_value:.2f}")
+
+    print(f"Processed {len(images)} images in {src_folder}")
+
 
 def main(cgl, monitor, keyboardmonitor, RAW_DATA_DIR):
     if not RAW_DATA_DIR.exists():
@@ -60,13 +135,15 @@ def main(cgl, monitor, keyboardmonitor, RAW_DATA_DIR):
         cv2.imwrite(str(RAW_DATA_DIR / f"{frame_label}.jpg"), blue_bird_eye_view)
         cv2.imwrite(str(digit_data_dir / f"{frame_label}.jpg"), digit_region)
         with open(RAW_DATA_DIR / f"{frame_label}.txt", "w") as f:
-            f.write(f"{controller_state['turning']:.2f} {controller_state['acceleration']:.2f}")
+            f.write(
+                f"{controller_state['turning']:.2f} {controller_state['acceleration']:.2f}"
+            )
         frame_label += 1
 
         end_of_get_frame = time.time()
 
         # wait for the next frame
-        if(end_of_get_frame - begin_of_get_frame) < 0.05:
+        if (end_of_get_frame - begin_of_get_frame) < 0.05:
             time.sleep(0.05 - (end_of_get_frame - begin_of_get_frame))
 
         if keyboardmonitor.is_interrupted():
@@ -96,7 +173,7 @@ def main(cgl, monitor, keyboardmonitor, RAW_DATA_DIR):
     # Set model to evaluation mode
     lite_digit_detector.eval()
 
-    digits = [str(digit_data_dir)+ "\\" + i for i in os.listdir(digit_data_dir)]
+    digits = [str(digit_data_dir) + "\\" + i for i in os.listdir(digit_data_dir)]
     for digit in digits:
         print(f"Processing {digit}...")
         img = cv2.imread(digit)
@@ -129,7 +206,7 @@ def main(cgl, monitor, keyboardmonitor, RAW_DATA_DIR):
     shutil.rmtree(digit_data_dir)
 
     # split the data into train and test set
-    processed_images = [i for i in os.listdir(RAW_DATA_DIR) if i.endswith(('.jpg'))]
+    processed_images = [i for i in os.listdir(RAW_DATA_DIR) if i.endswith((".jpg"))]
 
     train_path = RAW_DATA_DIR / "train"
     val_path = RAW_DATA_DIR / "val"
@@ -140,10 +217,21 @@ def main(cgl, monitor, keyboardmonitor, RAW_DATA_DIR):
         image_sequence = int(image.split(".")[0])
         if image_sequence < int(len(processed_images) * 0.8):
             shutil.move(str(RAW_DATA_DIR / image), str(train_path / image))
-            shutil.move(str(RAW_DATA_DIR / image.replace('.jpg', '.txt')), str(train_path / image.replace('.jpg', '.txt')))
+            shutil.move(
+                str(RAW_DATA_DIR / image.replace(".jpg", ".txt")),
+                str(train_path / image.replace(".jpg", ".txt")),
+            )
         else:
             shutil.move(str(RAW_DATA_DIR / image), str(val_path / image))
-            shutil.move(str(RAW_DATA_DIR / image.replace('.jpg', '.txt')), str(val_path / image.replace('.jpg', '.txt')))
+            shutil.move(
+                str(RAW_DATA_DIR / image.replace(".jpg", ".txt")),
+                str(val_path / image.replace(".jpg", ".txt")),
+            )
+
+    # Data augmentation step
+    augmented_data_dir = augment_dataset(RAW_DATA_DIR)
+    print(f"Original dataset: {RAW_DATA_DIR}")
+    print(f"Augmented dataset: {augmented_data_dir}")
 
     print(f"Stopping... You have been playing for {frame_label * 0.05:.2f} seconds")
 
