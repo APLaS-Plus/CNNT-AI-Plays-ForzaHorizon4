@@ -117,6 +117,10 @@ def main(cgl, monitor, keyboardmonitor, RAW_DATA_DIR):
     # wait for player to start the game
     time.sleep(5)
 
+    controller_state = {
+        "turning": 0.0,
+        "acceleration": 0.0,
+        }
     frame_label = 0
     while True:
         # get digit region and blue bird eye view
@@ -126,10 +130,6 @@ def main(cgl, monitor, keyboardmonitor, RAW_DATA_DIR):
         # cv2.imshow("blue_bird_eye_view", blue_bird_eye_view)
         # if cv2.waitKey(1) & 0xFF == ord("q"):
         #     break
-
-        # get contorl state
-        controller_state = monitor.get_combined_state()
-        # print(f"Turning: {controller_state['turning']:.2f}, Acceleration: {controller_state['acceleration']:.2f}")
 
         # save the frame and control state
         cv2.imwrite(str(RAW_DATA_DIR / f"{frame_label}.jpg"), blue_bird_eye_view)
@@ -145,6 +145,10 @@ def main(cgl, monitor, keyboardmonitor, RAW_DATA_DIR):
         # wait for the next frame
         if (end_of_get_frame - begin_of_get_frame) < 0.05:
             time.sleep(0.05 - (end_of_get_frame - begin_of_get_frame))
+
+        # get contorl state
+        controller_state = monitor.get_combined_state()
+        # print(f"Turning: {controller_state['turning']:.2f}, Acceleration: {controller_state['acceleration']:.2f}")
 
         if keyboardmonitor.is_interrupted():
             print("Keyboard interrupt detected. Exiting...")
