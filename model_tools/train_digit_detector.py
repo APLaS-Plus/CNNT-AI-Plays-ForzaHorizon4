@@ -283,8 +283,8 @@ if __name__ == "__main__":
     train_dataset = DigitDataset(data_dir, transform=transform, split="train")
     val_dataset = DigitDataset(data_dir, transform=transform, split="val")
 
-    train_loader = DataLoader(train_dataset, batch_size=80, shuffle=True, num_workers=4)
-    val_loader = DataLoader(val_dataset, batch_size=80, shuffle=False, num_workers=4)
+    train_loader = DataLoader(train_dataset, batch_size=160, shuffle=True, num_workers=8)
+    val_loader = DataLoader(val_dataset, batch_size=160, shuffle=False, num_workers=8)
 
     # Print dataset info
     print(f"Training set size: {len(train_dataset)}")
@@ -310,7 +310,7 @@ if __name__ == "__main__":
         val_loader,
         criterion,
         optimizer,
-        num_epochs=50,
+        num_epochs=100,
         device=device,
         model_save_path=model_save_path,
     )
