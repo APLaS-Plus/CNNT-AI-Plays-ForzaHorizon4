@@ -120,7 +120,7 @@ def main(cgl, monitor, keyboardmonitor, RAW_DATA_DIR):
     controller_state = {
         "turning": 0.0,
         "acceleration": 0.0,
-        }
+    }
     frame_label = 0
     while True:
         # get digit region and blue bird eye view
@@ -164,7 +164,7 @@ def main(cgl, monitor, keyboardmonitor, RAW_DATA_DIR):
     # stop monitoring
     monitor.stop_monitoring()
     keyboardmonitor.stop_monitoring()
-    lite_digit_detector = LiteDigitDetector(input_height=48, input_width=80)
+    lite_digit_detector = LiteDigitDetector(input_height=48, input_width=96)
 
     # Load pretrained weights
     model_path = ROOT_DIR / "model" / "LDD" / "best_digit_model.pth"
@@ -201,41 +201,150 @@ def main(cgl, monitor, keyboardmonitor, RAW_DATA_DIR):
         morph = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
 
         # Convert processed image to PIL format
-        pil_img = Image.fromarray(morph)
+        pil_img = Image.fromarray(morph, mode="L")
 
         digit_value = lite_digit_detector.predict(pil_img)
         digit_value = digit_value[0] * 100 + digit_value[1] * 10 + digit_value[2]
         with open(digit.replace("digit_data", "").replace(".jpg", ".txt"), "a") as f:
             f.write(f" {digit_value}")
-    shutil.rmtree(digit_data_dir)
 
-    # split the data into train and test set
-    processed_images = [i for i in os.listdir(RAW_DATA_DIR) if i.endswith((".jpg"))]
+        # 保存处理后的数字图片到原目录中，添加 "_processed" 后缀以区分原图
+        processed_img_path = digit.replace(".jpg", "_processed.jpg")
+        cv2.imwrite(processed_img_path, morph)
 
-    train_path = RAW_DATA_DIR / "train"
-    val_path = RAW_DATA_DIR / "val"
-    train_path.mkdir(parents=True, exist_ok=True)
-    val_path.mkdir(parents=True, exist_ok=True)
+    # 不再删除数字数据目录
+    print(f"Digit data preserved at: {digit_data_dir}")
 
-    for image in processed_images:
-        image_sequence = int(image.split(".")[0])
-        if image_sequence < int(len(processed_images) * 0.8):
-            shutil.move(str(RAW_DATA_DIR / image), str(train_path / image))
-            shutil.move(
-                str(RAW_DATA_DIR / image.replace(".jpg", ".txt")),
-                str(train_path / image.replace(".jpg", ".txt")),
+    # 将数据集拆分为4个子集，并按照3:1的比例划分训练集和验证集
+    processed_images = [
+        i
+        for i in os.listdir(RAW_DATA_DIR)
+        if i.endswith((".jpg")) and not i.endswith("_processed.jpg")
+    ]
+
+    # 按照序列号排序图片
+    processed_images.sort(key=lambda x: int(x.split(".")[0]))
+    total_images = len(processed_images)
+
+    # 创建4个数据集目录，命名为CNNT_n_m格式
+    dataset_dirs = []
+    data_dir_name = RAW_DATA_DIR.name  # e.g. "data_1"
+
+    for i in range(4):
+        dataset_name = f"{data_dir_name}_{i+1}"
+        dataset_dir = RAW_DATA_DIR.parent / dataset_name
+        if not dataset_dir.exists():
+            dataset_dir.mkdir(parents=True, exist_ok=True)
+
+        # 为每个数据集创建训练集和验证集目录
+        train_path = dataset_dir / "train"
+        val_path = dataset_dir / "val"
+        train_digit_path = train_path / "digit_data"
+        val_digit_path = val_path / "digit_data"
+
+        train_path.mkdir(parents=True, exist_ok=True)
+        val_path.mkdir(parents=True, exist_ok=True)
+        train_digit_path.mkdir(parents=True, exist_ok=True)
+        val_digit_path.mkdir(parents=True, exist_ok=True)
+
+        dataset_dirs.append(
+            {
+                "name": dataset_name,
+                "dir": dataset_dir,
+                "train": train_path,
+                "val": val_path,
+                "train_digit": train_digit_path,
+                "val_digit": val_digit_path,
+            }
+        )
+
+    # 将图片平均分配到4个数据集
+    images_per_dataset = total_images // 4
+
+    for i in range(4):
+        start_idx = i * images_per_dataset
+        end_idx = (i + 1) * images_per_dataset if i < 3 else total_images
+        dataset_images = processed_images[start_idx:end_idx]
+
+        # 按照3:1的比例划分训练集和验证集
+        train_split = int(len(dataset_images) * 0.75)
+
+        # 获取当前数据集的目录信息
+        current_dataset = dataset_dirs[i]
+
+        # 处理训练集
+        for j in range(train_split):
+            image = dataset_images[j]
+            image_sequence = int(image.split(".")[0])
+            digit_image = os.path.join(str(digit_data_dir), image)
+            digit_image_processed = os.path.join(
+                str(digit_data_dir), image.replace(".jpg", "_processed.jpg")
             )
-        else:
-            shutil.move(str(RAW_DATA_DIR / image), str(val_path / image))
-            shutil.move(
+
+            # 检查对应的数字图像是否存在
+            has_digit_image = os.path.exists(digit_image)
+            has_digit_processed = os.path.exists(digit_image_processed)
+
+            # 复制原始图像和对应的文本到训练集
+            shutil.copy(
+                str(RAW_DATA_DIR / image), str(current_dataset["train"] / image)
+            )
+            shutil.copy(
                 str(RAW_DATA_DIR / image.replace(".jpg", ".txt")),
-                str(val_path / image.replace(".jpg", ".txt")),
+                str(current_dataset["train"] / image.replace(".jpg", ".txt")),
             )
 
-    # Data augmentation step
-    augmented_data_dir = augment_dataset(RAW_DATA_DIR)
-    print(f"Original dataset: {RAW_DATA_DIR}")
-    print(f"Augmented dataset: {augmented_data_dir}")
+            # 复制对应的数字图像(如果存在)
+            if has_digit_image:
+                shutil.copy(digit_image, str(current_dataset["train_digit"] / image))
+            if has_digit_processed:
+                shutil.copy(
+                    digit_image_processed,
+                    str(
+                        current_dataset["train_digit"]
+                        / image.replace(".jpg", "_processed.jpg")
+                    ),
+                )
+
+        # 处理验证集
+        for j in range(train_split, len(dataset_images)):
+            image = dataset_images[j]
+            image_sequence = int(image.split(".")[0])
+            digit_image = os.path.join(str(digit_data_dir), image)
+            digit_image_processed = os.path.join(
+                str(digit_data_dir), image.replace(".jpg", "_processed.jpg")
+            )
+
+            # 检查对应的数字图像是否存在
+            has_digit_image = os.path.exists(digit_image)
+            has_digit_processed = os.path.exists(digit_image_processed)
+
+            # 复制原始图像和对应的文本到验证集
+            shutil.copy(str(RAW_DATA_DIR / image), str(current_dataset["val"] / image))
+            shutil.copy(
+                str(RAW_DATA_DIR / image.replace(".jpg", ".txt")),
+                str(current_dataset["val"] / image.replace(".jpg", ".txt")),
+            )
+
+            # 复制对应的数字图像(如果存在)
+            if has_digit_image:
+                shutil.copy(digit_image, str(current_dataset["val_digit"] / image))
+            if has_digit_processed:
+                shutil.copy(
+                    digit_image_processed,
+                    str(
+                        current_dataset["val_digit"]
+                        / image.replace(".jpg", "_processed.jpg")
+                    ),
+                )
+
+    print("Data has been split into 4 datasets with 3:1 train-validation ratio:")
+    for dataset in dataset_dirs:
+        # 为每个数据集执行数据增强
+        augmented_data_dir = augment_dataset(dataset["dir"])
+        print(f"Dataset: {dataset['name']}")
+        print(f"  - Original: {dataset['dir']}")
+        print(f"  - Augmented: {augmented_data_dir}")
 
     print(f"Stopping... You have been playing for {frame_label * 0.05:.2f} seconds")
 

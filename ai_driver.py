@@ -8,6 +8,7 @@ import numpy as np
 import math
 from PIL import Image
 import threading
+from collections import defaultdict
 
 ROOT_DIR = pathlib.Path(__file__).resolve().parent
 
@@ -19,6 +20,49 @@ from utils.capture_guideline import CaptureGuideline
 from utils.controller_output import ControllerOutput
 from utils.model.CNN_GLtransformer import CNNT
 from utils.model.lite_digit_detector import LiteDigitDetector
+
+
+# 添加时间测量工具
+class TimeMeasurement:
+    def __init__(self):
+        self.times = defaultdict(list)
+
+    def measure(self, name):
+        return TimeContext(self, name)
+
+    def get_stats(self):
+        """计算并返回每个部分的平均耗时和百分比"""
+        stats = {}
+        total_time = 0
+        for name, times in self.times.items():
+            if times:
+                avg_time = sum(times) / len(times)
+                stats[name] = {
+                    "avg": avg_time,
+                    "count": len(times),
+                    "total": sum(times),
+                }
+                total_time += sum(times)
+
+        # 计算百分比
+        if total_time > 0:
+            for name in stats:
+                stats[name]["percentage"] = (stats[name]["total"] / total_time) * 100
+
+        return stats, total_time
+
+
+class TimeContext:
+    def __init__(self, timer, name):
+        self.timer = timer
+        self.name = name
+
+    def __enter__(self):
+        self.start = time.time()
+        return self
+
+    def __exit__(self, *args):
+        self.timer.times[self.name].append(time.time() - self.start)
 
 
 def sanitize_output(value):
@@ -69,7 +113,7 @@ class AIDriver:
         self.controller = ControllerOutput()
 
         # Initialize digit detector
-        self.digit_detector = LiteDigitDetector(input_height=48, input_width=80)
+        self.digit_detector = LiteDigitDetector(input_height=48, input_width=96)
         self.load_digit_detector()
 
         # Initialize CNNT model
@@ -91,6 +135,9 @@ class AIDriver:
         # Performance tracking
         self.frame_times = []
         self.last_time = time.time()
+
+        # 添加时间测量工具
+        self.timer = TimeMeasurement()
 
     def load_digit_detector(self):
         """Load the digit detector model"""
@@ -142,7 +189,7 @@ class AIDriver:
         morph = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
 
         # Convert processed image to PIL format
-        pil_img = Image.fromarray(morph)
+        pil_img = Image.fromarray(morph, mode="L")
 
         # Predict digits
         with torch.no_grad():
@@ -154,61 +201,49 @@ class AIDriver:
 
     def process_frame(self):
         """Process a single frame: capture, detect speed, predict controls"""
-        # Get current state from screen
-        digit_region, blue_bird_eye_view = self.cgl.get_currunt_key_region()
+        with self.timer.measure("总处理时间"):
+            # Get current state from screen
+            with self.timer.measure("屏幕捕获"):
+                digit_region, blue_bird_eye_view = self.cgl.get_currunt_key_region()
 
-        # cv2.imshow("digit_region", digit_region)
-        # cv2.imshow("blue_bird_eye_view", blue_bird_eye_view)
-        # if cv2.waitKey(1) & 0xFF == ord("q"):
-        #     self.running = False
-        #     return
+            # Detect speed from digit region
+            with self.timer.measure("速度检测"):
+                speed = self.detect_speed(digit_region)
 
-        # Detect speed from digit region
-        speed = self.detect_speed(digit_region)
+            # Convert guideline image for model input
+            with self.timer.measure("图像预处理"):
+                guideline_tensor = Image.fromarray(blue_bird_eye_view).convert("L")
+                transform = transforms.Compose(
+                    [
+                        transforms.Resize((240, 136)),
+                        transforms.ToTensor(),
+                    ]
+                )
+                guideline_tensor = transform(guideline_tensor).unsqueeze(0)
+                guideline_tensor = guideline_tensor.to(self.device)
 
-        # Convert guideline image for model input
-        # print(blue_bird_eye_view.shape)
-        guideline_tensor = Image.fromarray(blue_bird_eye_view).convert("L")
-        transform = transforms.Compose(
-            [
-                transforms.Resize((240, 136)),
-                transforms.ToTensor(),
-            ]
-        )
-        guideline_tensor = transform(guideline_tensor).unsqueeze(
-            0
-        )  # Add batch dimension
-        # print(guideline_tensor.shape)
-        guideline_tensor = guideline_tensor.to(self.device)
+            # Model inference
+            with self.timer.measure("模型推理"):
+                with torch.no_grad():
+                    (
+                        steering,
+                        acceleration,
+                        self.memory_queue,
+                        self.frame_queue,
+                        self.speed_queue,
+                    ) = self.model(
+                        self.frame_queue,
+                        self.speed_queue,
+                        guideline_tensor,
+                        speed,
+                        self.memory_queue,
+                        device=self.device,
+                        timer=self.timer,
+                    )
+                    print("predict successfully")
 
-        # Model inference
-        with torch.no_grad():
-            (
-                steering,
-                acceleration,
-                self.memory_queue,
-                self.frame_queue,
-                self.speed_queue,
-            ) = self.model(
-                self.frame_queue,
-                self.speed_queue,
-                guideline_tensor,
-                speed,
-                self.memory_queue,
-                device=self.device,
-            )
-            print("predict scuessfully")
+            steering, acceleration = steering.item(), acceleration.item()
 
-        # print(
-        #     f"steering: {torch.isnan(steering)}, acceleration: {torch.isnan(acceleration)}"
-        # )
-        steering, acceleration = (
-            steering.item(),
-            acceleration.item(),
-        )
-        debug_output(steering)
-        debug_output(acceleration)
-        # print(f"steering: {np.isnan(steering)}, acceleration: {np.isnan(acceleration)}")
         return steering, acceleration
 
     def update_controller(self, steering, acceleration):
@@ -246,9 +281,8 @@ class AIDriver:
                 steering, acceleration = self.process_frame()
                 steering = sanitize_output(steering)
                 acceleration = sanitize_output(acceleration)
-                # print(f"steering: {steering}, acceleration: {acceleration}")
-                # Only apply controls after warmup period
 
+                # Only apply controls after warmup period
                 if frame_count >= warmup_frames:
                     self.update_controller(steering, acceleration)
                     print(
@@ -263,6 +297,10 @@ class AIDriver:
                 if process_time < 0.1:
                     time.sleep(0.1 - process_time)
 
+                # 每100帧打印一次耗时统计
+                if frame_count > 0 and frame_count % 100 == 0:
+                    self.print_time_stats()
+
                 frame_count += 1
 
         except KeyboardInterrupt:
@@ -270,6 +308,9 @@ class AIDriver:
         except Exception as e:
             print(f"Error in drive loop: {e}")
         finally:
+            # 打印最终的耗时统计
+            self.print_time_stats()
+
             # Calculate average FPS
             if self.frame_times:
                 avg_process_time = sum(self.frame_times) / len(self.frame_times)
@@ -281,6 +322,27 @@ class AIDriver:
             self.controller.set_controls(0.0, 0.0, 0.0)
             self.controller.stop()
             self.running = False
+
+    def print_time_stats(self):
+        """打印各模块耗时统计"""
+        stats, total_time = self.timer.get_stats()
+
+        print("\n===== 模型性能统计 =====")
+        print(f"总耗时: {total_time:.4f}秒")
+        print("-" * 40)
+        print(f"{'模块名称':<25} {'平均耗时(ms)':<15} {'百分比':<10} {'调用次数'}")
+        print("-" * 40)
+
+        # 按百分比降序排序
+        sorted_stats = sorted(
+            stats.items(), key=lambda x: x[1]["percentage"], reverse=True
+        )
+        for name, info in sorted_stats:
+            print(
+                f"{name:<25} {info['avg']*1000:<15.2f} {info['percentage']:<10.2f}% {info['count']}"
+            )
+
+        print("=" * 40)
 
     def start(self):
         """Start the AI driver in a separate thread"""

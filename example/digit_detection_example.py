@@ -29,7 +29,7 @@ def predict_with_model(model, image):
 def main():
     bg = time.time()
     # 1. Load model
-    model = LiteDigitDetector(input_height=48, input_width=80)
+    model = LiteDigitDetector(input_height=48, input_width=96)
 
     # Load pretrained weights
     model_path = ROOT_DIR / ".." / "model" / "LDD" / "best_digit_model.pth"
@@ -106,7 +106,7 @@ def main():
     plt.imshow(img, cmap="gray")
     plt.title("Original Image")
     plt.subplot(1, 2, 2)
-    plt.imshow(digit_region, cmap="gray")
+    plt.imshow(morph, cmap="gray")
     plt.title("Captured Digit Region")
     plt.tight_layout()
     plt.show()

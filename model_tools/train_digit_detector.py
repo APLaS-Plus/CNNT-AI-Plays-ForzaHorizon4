@@ -9,14 +9,14 @@ from torchvision import transforms
 from PIL import Image
 import numpy as np
 import matplotlib.pyplot as plt
-import cv2  # Added cv2 import
+import cv2
+
+# 导入混合精度训练包
+from torch.cuda.amp import autocast, GradScaler
 
 ROOT_DIR = pathlib.Path(__file__).parent.resolve()
 UTILS_DIR = ROOT_DIR / ".."
 UTILS_DIR = str(UTILS_DIR.resolve())
-
-# print("Root directory:", ROOT_DIR)
-# print("Utils directory:", UTILS_DIR)
 
 sys.path.append(UTILS_DIR)  # Add utils directory to path
 from utils.model.lite_digit_detector import LiteDigitDetector
@@ -98,7 +98,7 @@ class DigitDataset(Dataset):
         morph = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
 
         # Convert processed image to PIL format
-        image = Image.fromarray(morph)
+        image = Image.fromarray(morph, mode="L")
 
         # Get label
         label = self.labels[idx]
@@ -115,17 +115,32 @@ def train(
     val_loader,
     criterion,
     optimizer,
+    scheduler=None,  # 添加scheduler参数
     num_epochs=10,
     device="cuda",
     model_save_path=None,
+    patience=15,
+    min_delta=0.001,
+    use_amp=True,
 ):
     """
-    Model training function
+    Model training function with early stopping and mixed precision
     """
+    # 创建梯度缩放器用于混合精度训练
+    scaler = GradScaler(enabled=use_amp)
+
     # Move model to specified device
     model = model.to(device)
     best_val_acc = 0.0
     history = {"train_loss": [], "train_acc": [], "val_loss": [], "val_acc": []}
+
+    # 早停计数器和最佳验证损失
+    early_stop_counter = 0
+    best_val_loss = float("inf")
+
+    # 设置CUDA性能优化选项 - 修复设备类型检查
+    if isinstance(device, torch.device) and device.type == "cuda":
+        torch.backends.cudnn.benchmark = True
 
     for epoch in range(num_epochs):
         # Training phase
@@ -135,37 +150,45 @@ def train(
         total_digits = 0
 
         for images, labels in train_loader:
-            images = images.to(device)
-            # Each label contains 3 digits
-            digit1_labels = labels[:, 0].to(device)
-            digit2_labels = labels[:, 1].to(device)
-            digit3_labels = labels[:, 2].to(device)
+            # 确保数据在正确的设备上
+            images = images.to(device, non_blocking=True)
+            digit1_labels = labels[:, 0].to(device, non_blocking=True)
+            digit2_labels = labels[:, 1].to(device, non_blocking=True)
+            digit3_labels = labels[:, 2].to(device, non_blocking=True)
 
-            # Forward pass
+            # 使用混合精度训练
+            with autocast(enabled=use_amp):
+                # Forward pass
+                digit1_pred, digit2_pred, digit3_pred = model(images)
+
+                # Calculate loss
+                loss1 = criterion(digit1_pred, digit1_labels)
+                loss2 = criterion(digit2_pred, digit2_labels)
+                loss3 = criterion(digit3_pred, digit3_labels)
+                loss = loss1 + loss2 + loss3
+
+            # 使用混合精度进行反向传播
             optimizer.zero_grad()
-            digit1_pred, digit2_pred, digit3_pred = model(images)
-
-            # Calculate loss
-            loss1 = criterion(digit1_pred, digit1_labels)
-            loss2 = criterion(digit2_pred, digit2_labels)
-            loss3 = criterion(digit3_pred, digit3_labels)
-            loss = loss1 + loss2 + loss3
-
-            # Backward pass and optimization
-            loss.backward()
-            optimizer.step()
+            if use_amp:
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                loss.backward()
+                optimizer.step()
 
             train_loss += loss.item() * images.size(0)
 
-            # Calculate accuracy
-            _, pred1 = torch.max(digit1_pred, 1)
-            _, pred2 = torch.max(digit2_pred, 1)
-            _, pred3 = torch.max(digit3_pred, 1)
+            # Calculate accuracy - 确保在GPU上计算
+            with torch.no_grad():
+                _, pred1 = torch.max(digit1_pred, 1)
+                _, pred2 = torch.max(digit2_pred, 1)
+                _, pred3 = torch.max(digit3_pred, 1)
 
-            correct_digits += (pred1 == digit1_labels).sum().item()
-            correct_digits += (pred2 == digit2_labels).sum().item()
-            correct_digits += (pred3 == digit3_labels).sum().item()
-            total_digits += labels.size(0) * 3  # 3 digits per sample
+                correct_digits += (pred1 == digit1_labels).sum().item()
+                correct_digits += (pred2 == digit2_labels).sum().item()
+                correct_digits += (pred3 == digit3_labels).sum().item()
+                total_digits += labels.size(0) * 3
 
         # Calculate average loss and accuracy
         train_loss = train_loss / len(train_loader.dataset)
@@ -179,19 +202,21 @@ def train(
 
         with torch.no_grad():
             for images, labels in val_loader:
-                images = images.to(device)
-                digit1_labels = labels[:, 0].to(device)
-                digit2_labels = labels[:, 1].to(device)
-                digit3_labels = labels[:, 2].to(device)
+                images = images.to(device, non_blocking=True)
+                digit1_labels = labels[:, 0].to(device, non_blocking=True)
+                digit2_labels = labels[:, 1].to(device, non_blocking=True)
+                digit3_labels = labels[:, 2].to(device, non_blocking=True)
 
-                # Forward pass
-                digit1_pred, digit2_pred, digit3_pred = model(images)
+                # 使用混合精度进行推理
+                with autocast(enabled=use_amp):
+                    # Forward pass
+                    digit1_pred, digit2_pred, digit3_pred = model(images)
 
-                # Calculate loss
-                loss1 = criterion(digit1_pred, digit1_labels)
-                loss2 = criterion(digit2_pred, digit2_labels)
-                loss3 = criterion(digit3_pred, digit3_labels)
-                loss = loss1 + loss2 + loss3
+                    # Calculate loss
+                    loss1 = criterion(digit1_pred, digit1_labels)
+                    loss2 = criterion(digit2_pred, digit2_labels)
+                    loss3 = criterion(digit3_pred, digit3_labels)
+                    loss = loss1 + loss2 + loss3
 
                 val_loss += loss.item() * images.size(0)
 
@@ -208,12 +233,27 @@ def train(
         val_loss = val_loss / len(val_loader.dataset)
         val_acc = correct_digits / total_digits
 
+        # 如果提供了调度器，使用它来调整学习率
+        if scheduler is not None:
+            scheduler.step(val_loss)
+
         # Save best model
         if val_acc > best_val_acc:
             best_val_acc = val_acc
             torch.save(
                 model.state_dict(), str(model_save_path / "best_digit_model.pth")
             )
+
+        # 早停机制
+        if val_loss < (best_val_loss - min_delta):
+            best_val_loss = val_loss
+            early_stop_counter = 0
+        else:
+            early_stop_counter += 1
+
+        if early_stop_counter >= patience:
+            print(f"早停机制触发，训练在第 {epoch+1} 轮停止")
+            break
 
         # Record history
         history["train_loss"].append(train_loss)
@@ -262,6 +302,15 @@ if __name__ == "__main__":
     torch.manual_seed(42)
     np.random.seed(42)
 
+    # 设置CUDA优化选项
+    if torch.cuda.is_available():
+        torch.backends.cudnn.benchmark = True
+        # 预热GPU
+        warming_tensor = torch.randn(8, 1, 48, 96).cuda()
+        with torch.no_grad():
+            for _ in range(10):
+                _ = torch.mean(warming_tensor)
+
     # Define dataset path
     data_dir = ROOT_DIR / ".." / "dataset" / "digit"  # Modify to your dataset path
     data_dir = str(data_dir.resolve())
@@ -273,7 +322,7 @@ if __name__ == "__main__":
     # Define image transformations - updated to use the optimized image size
     transform = transforms.Compose(
         [
-            transforms.Resize((48, 80)),  # Updated from (40, 120) to (48, 80)
+            transforms.Resize((48, 96)),  # Updated from (40, 120) to (48, 96)
             transforms.ToTensor(),
             transforms.Normalize((0.5,), (0.5,)),
         ]
@@ -283,8 +332,25 @@ if __name__ == "__main__":
     train_dataset = DigitDataset(data_dir, transform=transform, split="train")
     val_dataset = DigitDataset(data_dir, transform=transform, split="val")
 
-    train_loader = DataLoader(train_dataset, batch_size=160, shuffle=True, num_workers=8)
-    val_loader = DataLoader(val_dataset, batch_size=160, shuffle=False, num_workers=8)
+    # 优化数据加载器配置，使用pin_memory加速数据传输到GPU
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=192,  # 增加批处理大小以利用GPU并行能力
+        shuffle=True,
+        num_workers=8,
+        pin_memory=True,  # 使用页锁定内存加速数据传输
+        prefetch_factor=2,  # 预取因子
+        persistent_workers=True,  # 保持工作进程活跃
+    )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=256,  # 验证时可使用更大批量
+        shuffle=False,
+        num_workers=8,
+        pin_memory=True,
+        prefetch_factor=2,
+        persistent_workers=True,
+    )
 
     # Print dataset info
     print(f"Training set size: {len(train_dataset)}")
@@ -292,27 +358,45 @@ if __name__ == "__main__":
     print(f"Input data shape: {train_dataset[0][0].shape}")  # Should be (1, 48, 80)
 
     # Create model with optimized parameters
-    model = LiteDigitDetector(input_height=48, input_width=80)
+    model = LiteDigitDetector(input_height=48, input_width=96)
 
     # Define loss function and optimizer
     criterion = nn.CrossEntropyLoss()
-    # Use a slightly higher learning rate for the smaller model
-    optimizer = optim.Adam(model.parameters(), lr=0.002)
 
-    # Check CUDA availability
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
+    # 优化器使用更适合GPU训练的配置
+    optimizer = optim.AdamW(model.parameters(), lr=0.002, weight_decay=0.01)
+    # 学习率调度器以优化训练过程
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode="min", factor=0.5, patience=5, verbose=True
+    )
 
-    # Train model
+    # Check CUDA availability and select best device
+    if torch.cuda.is_available():
+        # 使用最快的GPU设备
+        device = torch.device(f"cuda:{torch.cuda.current_device()}")
+        # 打印GPU信息
+        print(f"使用GPU: {torch.cuda.get_device_name(device)}")
+        print(
+            f"GPU内存: {torch.cuda.get_device_properties(device).total_memory / 1024 / 1024 / 1024:.2f} GB"
+        )
+    else:
+        device = torch.device("cpu")
+        print("警告: 无可用GPU，使用CPU训练将会非常慢")
+
+    # Train model with early stopping and mixed precision
     history = train(
         model,
         train_loader,
         val_loader,
         criterion,
         optimizer,
-        num_epochs=100,
+        scheduler=scheduler,  # 传递学习率调度器
+        num_epochs=150,
         device=device,
         model_save_path=model_save_path,
+        patience=30,
+        min_delta=0.001,
+        use_amp=True,  # 启用混合精度训练
     )
 
     # Plot training history
