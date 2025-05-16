@@ -119,7 +119,7 @@ class AIDriver:
         # Initialize CNNT model
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         self.model = CNNT(
-            input_height=240, input_width=136, maxtime_step=40, memory_size=160
+            input_height=240, input_width=144, maxtime_step=40, memory_size=160
         )
         self.load_cnnt_model()
 

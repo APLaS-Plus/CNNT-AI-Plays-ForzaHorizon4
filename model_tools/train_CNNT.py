@@ -11,6 +11,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import glob
 from tqdm import tqdm
+from torch.cuda.amp import autocast, GradScaler  # 导入混合精度训练工具
 
 ROOT_DIR = pathlib.Path(__file__).parent.resolve()
 UTILS_DIR = ROOT_DIR / ".."
@@ -102,7 +103,11 @@ class CNNTDataset(Dataset):
         label_seq = torch.tensor(labels, dtype=torch.float32)  # shape: [seq_len, 2]
         speed_seq = torch.tensor(speeds, dtype=torch.float32)  # shape: [seq_len, 1]
 
-        return image_seq, label_seq, speed_seq
+        # 提取转向和加速度为单独的序列
+        steering_seq = label_seq[:, 0:1]  # 取第一列并保持维度 [seq_len, 1]
+        acceleration_seq = label_seq[:, 1:2]  # 取第二列并保持维度 [seq_len, 1]
+
+        return image_seq, steering_seq, acceleration_seq, speed_seq
 
 
 def train(
@@ -111,9 +116,13 @@ def train(
     val_loader,
     criterion,
     optimizer,
+    scheduler=None,
     num_epochs=10,
     device="cuda",
     model_save_path=None,
+    accumulation_steps=2,  # 梯度累积步数
+    clip_grad_norm=1.0,  # 梯度裁剪阈值
+    use_amp=True,  # 是否使用混合精度训练
 ):
     """
     Train the CNNT model with sequential data
@@ -128,7 +137,9 @@ def train(
         "val_steering_loss": [],
         "val_accel_loss": [],
     }
-    torch.autograd.set_detect_anomaly(True)
+
+    # 创建梯度缩放器用于混合精度训练
+    scaler = GradScaler() if use_amp else None
 
     # Early stopping parameters
     patience = 10
@@ -142,83 +153,136 @@ def train(
         train_accel_loss = 0.0
 
         optimizer.zero_grad()
+        total_batches = len(train_loader)
 
         progress_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs} [Train]")
-        for images, labels, speeds in progress_bar:
+        for batch_idx, (images, steering_labels, accel_labels, speeds) in enumerate(
+            progress_bar
+        ):
             batch_size, seq_len = images.shape[0], images.shape[1]
 
-            # Initialize memory for sequence processing
+            # 初始化队列
             frame_queue = None
             speed_queue = None
+            steering_queue = None
+            acceleration_queue = None
             memory_queue = None
 
-            # Process each frame in the sequence
+            # 处理每个序列
             sequence_loss = 0.0
             sequence_steering_loss = 0.0
             sequence_accel_loss = 0.0
 
-            for t in range(seq_len):
-                current_frame = images[:, t].to(device)  # [B, C, H, W]
-                current_speed = speeds[:, t].to(device)  # [B, 1]
+            with autocast(enabled=use_amp):  # 启用混合精度训练
+                for t in range(seq_len):
+                    current_frame = images[:, t].to(device)  # [B, C, H, W]
+                    current_speed = speeds[:, t].to(device)  # [B, 1]
+                    current_steering = steering_labels[:, t].to(device)  # [B, 1]
+                    current_accel = accel_labels[:, t].to(device)  # [B, 1]
 
-                # Forward pass
-                steering, acceleration, new_memory, frame_queue, speed_queue = model(
-                    frame_queue,
-                    speed_queue,
-                    current_frame,
-                    current_speed,
-                    memory_queue,
-                    device=device,
-                )
-                # print(f"steering: {steering.shape}, acceleration: {acceleration.shape}")
+                    # 前向传播 - 使用新的模型接口
+                    (
+                        steering,
+                        acceleration,
+                        new_memory,
+                        frame_queue,
+                        speed_queue,
+                        steering_queue,
+                        acceleration_queue,
+                    ) = model(
+                        frame_queue,
+                        speed_queue,
+                        steering_queue,
+                        acceleration_queue,
+                        current_frame,
+                        current_speed,
+                        current_steering,
+                        current_accel,
+                        memory_tensor=memory_queue,
+                        device=device,
+                    )
 
-                # Update memory for next frame
-                memory_queue = new_memory.clone().detach().to(device)
+                    # 更新记忆队列
+                    memory_queue = new_memory
 
-                # Calculate loss if it's not the first few frames (warm-up phase)
-                if t >= 10:  # Start predicting after seeing enough context
-                    target_steering = labels[:, t, 0].to(device)
-                    target_accel = labels[:, t, 1].to(device)
+                    # 计算损失（跳过前10帧的预热阶段）
+                    if t >= 10:
+                        target_steering = steering_labels[:, t, 0].to(device)
+                        target_accel = accel_labels[:, t, 0].to(device)
 
-                    # MSE loss for steering and acceleration
-                    steer_loss = criterion(steering, target_steering)
-                    accel_loss = criterion(acceleration, target_accel)
-                    frame_loss = steer_loss + accel_loss
+                        steer_loss = criterion(steering, target_steering)
+                        accel_loss = criterion(acceleration, target_accel)
+                        frame_loss = steer_loss + accel_loss
 
-                    sequence_loss += frame_loss.item()
-                    sequence_steering_loss += steer_loss.item()
-                    sequence_accel_loss += accel_loss.item()
+                        sequence_loss += frame_loss.item()
+                        sequence_steering_loss += steer_loss.item()
+                        sequence_accel_loss += accel_loss.item()
 
+            # 反向传播与优化
             if seq_len > 10:
-                # Backward pass and optimization
+                if use_amp:
+                    # 混合精度反向传播
+                    scaler.scale(frame_loss / accumulation_steps).backward()
 
-                frame_loss.backward(
-                    retain_graph=True
-                )  # Keep graph for memory continuity
-                optimizer.step()
+                    if ((batch_idx + 1) % accumulation_steps == 0) or (
+                        batch_idx + 1 == total_batches
+                    ):
+                        # 梯度裁剪
+                        scaler.unscale_(optimizer)
+                        torch.nn.utils.clip_grad_norm_(
+                            model.parameters(), clip_grad_norm
+                        )
 
-            # Average loss over predicted frames (skip warm-up frames)
-            avg_seq_loss = sequence_loss / (seq_len - 10)
-            avg_seq_steering_loss = sequence_steering_loss / (seq_len - 10)
-            avg_seq_accel_loss = sequence_accel_loss / (seq_len - 10)
+                        # 更新参数
+                        scaler.step(optimizer)
+                        scaler.update()
+                        optimizer.zero_grad()
+                else:
+                    # 普通反向传播
+                    (frame_loss / accumulation_steps).backward()
+
+                    if ((batch_idx + 1) % accumulation_steps == 0) or (
+                        batch_idx + 1 == total_batches
+                    ):
+                        # 梯度裁剪
+                        torch.nn.utils.clip_grad_norm_(
+                            model.parameters(), clip_grad_norm
+                        )
+
+                        # 更新参数
+                        optimizer.step()
+                        optimizer.zero_grad()
+
+            # 计算平均损失
+            avg_seq_loss = sequence_loss / max(1, seq_len - 10)
+            avg_seq_steering_loss = sequence_steering_loss / max(1, seq_len - 10)
+            avg_seq_accel_loss = sequence_accel_loss / max(1, seq_len - 10)
 
             train_loss += avg_seq_loss * batch_size
             train_steering_loss += avg_seq_steering_loss * batch_size
             train_accel_loss += avg_seq_accel_loss * batch_size
 
-            # Update progress bar
+            # 更新进度条
             progress_bar.set_postfix(
                 {
-                    "loss": avg_seq_loss,
-                    "steer_loss": avg_seq_steering_loss,
-                    "accel_loss": avg_seq_accel_loss,
+                    "loss": f"{avg_seq_loss:.4f}",
+                    "steer_loss": f"{avg_seq_steering_loss:.4f}",
+                    "accel_loss": f"{avg_seq_accel_loss:.4f}",
                 }
             )
 
-        # Calculate average training loss
+            # 释放无用内存
+            if batch_idx % 5 == 0:
+                torch.cuda.empty_cache()
+
+        # 计算平均训练损失
         train_loss /= len(train_loader.dataset)
         train_steering_loss /= len(train_loader.dataset)
         train_accel_loss /= len(train_loader.dataset)
+
+        # 学习率调度器步进
+        if scheduler:
+            scheduler.step()
 
         # Validation phase
         model.eval()
@@ -229,15 +293,17 @@ def train(
         progress_bar = tqdm(val_loader, desc=f"Epoch {epoch+1}/{num_epochs} [Val]")
 
         with torch.no_grad():
-            for images, labels, speeds in progress_bar:
+            for images, steering_labels, accel_labels, speeds in progress_bar:
                 batch_size, seq_len = images.shape[0], images.shape[1]
 
-                # Initialize memory for sequence processing
+                # 初始化队列
                 frame_queue = None
                 speed_queue = None
+                steering_queue = None
+                acceleration_queue = None
                 memory_queue = None
 
-                # Process each frame in the sequence
+                # 处理每个序列
                 sequence_loss = 0.0
                 sequence_steering_loss = 0.0
                 sequence_accel_loss = 0.0
@@ -245,26 +311,38 @@ def train(
                 for t in range(seq_len):
                     current_frame = images[:, t].to(device)
                     current_speed = speeds[:, t].to(device)
+                    current_steering = steering_labels[:, t].to(device)
+                    current_accel = accel_labels[:, t].to(device)
 
-                    # Forward pass
-                    steering, acceleration, new_memory, frame_queue, speed_queue = (
-                        model(
-                            frame_queue,
-                            speed_queue,
-                            current_frame,
-                            current_speed,
-                            memory_queue,
-                            device=device,
-                        )
+                    # 前向传播
+                    (
+                        steering,
+                        acceleration,
+                        new_memory,
+                        frame_queue,
+                        speed_queue,
+                        steering_queue,
+                        acceleration_queue,
+                    ) = model(
+                        frame_queue,
+                        speed_queue,
+                        steering_queue,
+                        acceleration_queue,
+                        current_frame,
+                        current_speed,
+                        current_steering,
+                        current_accel,
+                        memory_tensor=memory_queue,
+                        device=device,
                     )
 
-                    # Update memory for next frame
+                    # 更新记忆队列
                     memory_queue = new_memory
 
-                    # Calculate loss if it's not the first few frames
+                    # 计算损失（跳过前10帧）
                     if t >= 10:
-                        target_steering = labels[:, t, 0].to(device)
-                        target_accel = labels[:, t, 1].to(device)
+                        target_steering = steering_labels[:, t, 0].to(device)
+                        target_accel = accel_labels[:, t, 0].to(device)
 
                         steer_loss = criterion(steering, target_steering)
                         accel_loss = criterion(acceleration, target_accel)
@@ -274,38 +352,38 @@ def train(
                         sequence_steering_loss += steer_loss.item()
                         sequence_accel_loss += accel_loss.item()
 
-                # Average loss over predicted frames
-                avg_seq_loss = sequence_loss / (seq_len - 10)
-                avg_seq_steering_loss = sequence_steering_loss / (seq_len - 10)
-                avg_seq_accel_loss = sequence_accel_loss / (seq_len - 10)
+                # 计算平均损失
+                avg_seq_loss = sequence_loss / max(1, seq_len - 10)
+                avg_seq_steering_loss = sequence_steering_loss / max(1, seq_len - 10)
+                avg_seq_accel_loss = sequence_accel_loss / max(1, seq_len - 10)
 
                 val_loss += avg_seq_loss * batch_size
                 val_steering_loss += avg_seq_steering_loss * batch_size
                 val_accel_loss += avg_seq_accel_loss * batch_size
 
-                # Update progress bar
+                # 更新进度条
                 progress_bar.set_postfix(
                     {
-                        "val_loss": avg_seq_loss,
-                        "val_steer_loss": avg_seq_steering_loss,
-                        "val_accel_loss": avg_seq_accel_loss,
+                        "val_loss": f"{avg_seq_loss:.4f}",
+                        "val_steer": f"{avg_seq_steering_loss:.4f}",
+                        "val_accel": f"{avg_seq_accel_loss:.4f}",
                     }
                 )
 
-        # Calculate average validation loss
+        # 计算平均验证损失
         val_loss /= len(val_loader.dataset)
         val_steering_loss /= len(val_loader.dataset)
         val_accel_loss /= len(val_loader.dataset)
 
-        # Save best model
+        # 保存最佳模型
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             torch.save(model.state_dict(), str(model_save_path / "best_cnnt_model.pth"))
             print(f"Model saved with validation loss: {val_loss:.4f}")
-            # Reset early stopping counter
+            # 重置早停计数器
             counter = 0
         else:
-            # Validation loss did not improve, increment counter
+            # 验证损失没有改善，增加计数器
             counter += 1
             print(f"EarlyStopping counter: {counter} out of {patience}")
             if counter >= patience:
@@ -316,7 +394,7 @@ def train(
                 )
                 break
 
-        # Record history
+        # 记录历史
         history["train_loss"].append(train_loss)
         history["val_loss"].append(val_loss)
         history["train_steering_loss"].append(train_steering_loss)
@@ -329,6 +407,9 @@ def train(
             f"Train Loss: {train_loss:.4f} (Steer: {train_steering_loss:.4f}, Accel: {train_accel_loss:.4f}), "
             f"Val Loss: {val_loss:.4f} (Steer: {val_steering_loss:.4f}, Accel: {val_accel_loss:.4f})"
         )
+
+        # 每个epoch结束清理缓存
+        torch.cuda.empty_cache()
 
     return history
 
@@ -370,7 +451,7 @@ def plot_training_history(history, model_save_path=None):
 
 
 if __name__ == "__main__":
-    # Set random seed for reproducibility
+    # 设置随机种子以提高可重复性
     torch.manual_seed(42)
     np.random.seed(42)
 
@@ -392,12 +473,12 @@ if __name__ == "__main__":
     # Define image transformations
     transform = transforms.Compose(
         [
-            transforms.Resize((240, 136)),
+            transforms.Resize((240, 144)),
             transforms.ToTensor(),
         ]
     )
 
-    # Create datasets and data loaders with sequence handling
+    # 创建数据集和数据加载器
     train_dataset = CNNTDataset(
         data_dirs, transform=transform, split="train", sequence_length=40
     )
@@ -405,9 +486,28 @@ if __name__ == "__main__":
         data_dirs, transform=transform, split="val", sequence_length=40
     )
 
-    # Use smaller batch size for transformer model due to memory requirements
-    train_loader = DataLoader(train_dataset, batch_size=4, shuffle=False, num_workers=4)
-    val_loader = DataLoader(val_dataset, batch_size=4, shuffle=False, num_workers=4)
+    # 提高数据加载性能
+    num_workers = min(8, os.cpu_count() or 4)  # 使用合适数量的工作线程
+    prefetch_factor = 2  # 预取因子
+
+    # 使用pin_memory加速GPU传输
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=4,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=True,
+        prefetch_factor=prefetch_factor,
+    )
+
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=4,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=True,
+        prefetch_factor=prefetch_factor,
+    )
 
     # Print dataset info
     print(f"Training set size: {len(train_dataset)} sequences")
@@ -417,32 +517,46 @@ if __name__ == "__main__":
             f"Input sequence shape: {train_dataset[0][0].shape}"
         )  # Should be [seq_len, 1, 240, 136]
 
-    # Create CNNT model
-    model = CNNT(input_height=240, input_width=136, maxtime_step=40, memory_size=160)
+    # 创建CNNT模型
+    model = CNNT(input_height=240, input_width=144, maxtime_step=40, memory_size=150)
 
-    # Define loss function and optimizer
+    # 使用更高级的优化器配置
     criterion = nn.MSELoss()
-    optimizer = optim.Adam(model.parameters(), lr=0.00005)
+    optimizer = optim.AdamW(model.parameters(), lr=0.0001, weight_decay=1e-4)
 
-    # Check CUDA availability
+    # 添加学习率调度器
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, "min", patience=5, factor=0.5, verbose=True
+    )
+
+    # 检查CUDA可用性
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    # Train model
+    # 检查是否使用混合精度训练
+    use_amp = torch.cuda.is_available()
+    if use_amp:
+        print("Using mixed precision training")
+
+    # 训练模型
     history = train(
         model,
         train_loader,
         val_loader,
         criterion,
         optimizer,
+        scheduler=scheduler,
         num_epochs=50,
         device=device,
         model_save_path=model_save_path,
+        accumulation_steps=2,  # 使用梯度累积
+        clip_grad_norm=1.0,  # 使用梯度裁剪
+        use_amp=use_amp,  # 使用混合精度
     )
 
-    # Plot training history
+    # 绘制训练历史
     plot_training_history(history, model_save_path)
 
-    # Save final model
+    # 保存最终模型
     torch.save(model.state_dict(), str(model_save_path / "final_cnnt_model.pth"))
     print("Training completed, final model saved")

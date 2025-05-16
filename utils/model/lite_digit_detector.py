@@ -122,11 +122,11 @@ class LiteDigitDetector(nn.Module):
             x = torch.mean(x, dim=1, keepdim=True)  # 在GPU上转为灰度
         elif x.dim() == 3 and x.size(0) == 3:  # Single RGB image
             x = torch.mean(x, dim=0, keepdim=True).unsqueeze(0)
-        print(f"Input image size: {x.size()}")
+        # print(f"Input image size: {x.size()}")
         # Feature extraction
         features = self.features(x)
         batch_size = features.size(0)
-        print(f"Feature map size: {features.size()}")
+        # print(f"Feature map size: {features.size()}")
         # Split feature map by position
         digit1_features = features[:, :, :, : self.digit_width].reshape(batch_size, -1)
         digit2_features = features[
