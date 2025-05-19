@@ -139,7 +139,7 @@ def train(
     }
 
     # 创建梯度缩放器用于混合精度训练
-    scaler = GradScaler() if use_amp else None
+    scaler = torch.amp.GradScaler("cuda") if use_amp else None
 
     # Early stopping parameters
     patience = 10
@@ -173,7 +173,7 @@ def train(
             sequence_steering_loss = 0.0
             sequence_accel_loss = 0.0
 
-            with autocast(enabled=use_amp):  # 启用混合精度训练
+            with torch.amp.autocast("cuda", enabled=use_amp):  # 启用混合精度训练
                 for t in range(seq_len):
                     current_frame = images[:, t].to(device)  # [B, C, H, W]
                     current_speed = speeds[:, t].to(device)  # [B, 1]
@@ -280,10 +280,6 @@ def train(
         train_steering_loss /= len(train_loader.dataset)
         train_accel_loss /= len(train_loader.dataset)
 
-        # 学习率调度器步进
-        if scheduler:
-            scheduler.step()
-
         # Validation phase
         model.eval()
         val_loss = 0.0
@@ -375,6 +371,10 @@ def train(
         val_steering_loss /= len(val_loader.dataset)
         val_accel_loss /= len(val_loader.dataset)
 
+        # 学习率调度器步进
+        if scheduler:
+            scheduler.step(val_loss)
+            
         # 保存最佳模型
         if val_loss < best_val_loss:
             best_val_loss = val_loss
@@ -494,7 +494,7 @@ if __name__ == "__main__":
     train_loader = DataLoader(
         train_dataset,
         batch_size=4,
-        shuffle=False,
+        shuffle=True,
         num_workers=num_workers,
         pin_memory=True,
         prefetch_factor=prefetch_factor,
@@ -503,7 +503,7 @@ if __name__ == "__main__":
     val_loader = DataLoader(
         val_dataset,
         batch_size=4,
-        shuffle=False,
+        shuffle=True,
         num_workers=num_workers,
         pin_memory=True,
         prefetch_factor=prefetch_factor,
@@ -526,7 +526,7 @@ if __name__ == "__main__":
 
     # 添加学习率调度器
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, "min", patience=5, factor=0.5, verbose=True
+        optimizer, "min", patience=5, factor=0.5
     )
 
     # 检查CUDA可用性

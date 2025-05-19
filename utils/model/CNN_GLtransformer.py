@@ -198,7 +198,7 @@ class TransformerBlock(nn.Module):
         )
 
     def forward(self, input, memory_size=160):
-        # input shape: [batch_size, (5*3)*40+memory_size, 192]
+        # input shape: [batch_size, (5*3)*20+memory_size, 192]
         _input = self.norm1(input)
         memory_queue = _input[:, :memory_size, :]
         frame_queue = _input[:, memory_size:, :]
@@ -214,9 +214,8 @@ class TransformerBlock(nn.Module):
         )
 
         g_l_concat = torch.cat((global_attention_output, local_attention_output), dim=1)
-        g_l_concat = g_l_concat + input
         ffn_output = self.ffn(g_l_concat)
-        g_l_concat = g_l_concat + ffn_output
+        g_l_concat = self.dropout(g_l_concat) + ffn_output
         g_l_concat = self.dropout(g_l_concat)
         new_memory_queue = g_l_concat[:, :memory_size, :]
 
@@ -268,64 +267,134 @@ class CNNT(nn.Module):
         new_acceleration,
         memory_tensor=None,
         device="cpu",
+        timer=None,
     ):
-        if not isinstance(new_frame, torch.Tensor):
-            new_frame = self.transform(new_frame)
-        new_frame_patch = self.patch_embedding(new_frame)
-
-        if frame_queue is None:
-            frame_queue = torch.cat([new_frame_patch] * self.maxtime_step, dim=1)
-            speed_queue = torch.cat([new_speed] * self.maxtime_step, dim=1)
-            steering_queue = torch.cat([new_steering] * self.maxtime_step, dim=1)
-            acceleration_queue = torch.cat(
-                [new_acceleration] * self.maxtime_step, dim=1
-            )
+        # 使用timer测量处理新帧的时间
+        if timer:
+            with timer.measure("处理新帧"):
+                if not isinstance(new_frame, torch.Tensor):
+                    new_frame = self.transform(new_frame)
+                new_frame_patch = self.patch_embedding(new_frame)
         else:
-            frame_queue = torch.cat((frame_queue[:, :-16], new_frame_patch), dim=1)
-            speed_queue = torch.cat((speed_queue[:, :-1], new_speed), dim=1)
-            steering_queue = torch.cat((steering_queue[:, :-1], new_steering), dim=1)
-            acceleration_queue = torch.cat(
-                (acceleration_queue[:, :-1], new_acceleration), dim=1
-            )
+            if not isinstance(new_frame, torch.Tensor):
+                new_frame = self.transform(new_frame)
+            new_frame_patch = self.patch_embedding(new_frame)
 
-        # print(f"frame_queue shape: {frame_queue.shape}")
-        # print(f"speed_queue shape: {speed_queue.shape}")
-        # print(f"steering_queue shape: {steering_queue.shape}")
-        # print(f"acceleration_queue shape: {acceleration_queue.shape}")
-        concat_results = []
-        time_steps = torch.arange(1, self.maxtime_step + 1, device=device)
-        for i in range(frame_queue.shape[1] // 15):
-            speed_input = speed_queue[:, i]
-            steering_input = steering_queue[:, i]
-            acceleration_input = acceleration_queue[:, i]
-            if speed_input.dim() == 1:
-                speed_input = speed_input.unsqueeze(1)
-            if steering_input.dim() == 1:
-                steering_input = steering_input.unsqueeze(1)
-            if acceleration_input.dim() == 1:
-                acceleration_input = acceleration_input.unsqueeze(1)
-            concat_results.append(
-                self.concat(
-                    patch=frame_queue[:, i * 15 : i * 15 + 15],
-                    speed=speed_input,
-                    steering=steering_input,
-                    acceleration=acceleration_input,
-                    time_step=time_steps[i],
-                    mask_attr=(i == frame_queue.shape[1] // 15 - 1),
+        # 使用timer测量帧队列管理时间
+        if timer:
+            with timer.measure("队列管理"):
+                if frame_queue is None:
+                    frame_queue = torch.cat(
+                        [new_frame_patch] * self.maxtime_step, dim=1
+                    )
+                    speed_queue = torch.cat([new_speed] * self.maxtime_step, dim=1)
+                    steering_queue = torch.cat(
+                        [new_steering] * self.maxtime_step, dim=1
+                    )
+                    acceleration_queue = torch.cat(
+                        [new_acceleration] * self.maxtime_step, dim=1
+                    )
+                else:
+                    frame_queue = torch.cat(
+                        (frame_queue[:, :-16], new_frame_patch), dim=1
+                    )
+                    speed_queue = torch.cat((speed_queue[:, :-1], new_speed), dim=1)
+                    steering_queue = torch.cat(
+                        (steering_queue[:, :-1], new_steering), dim=1
+                    )
+                    acceleration_queue = torch.cat(
+                        (acceleration_queue[:, :-1], new_acceleration), dim=1
+                    )
+        else:
+            if frame_queue is None:
+                frame_queue = torch.cat([new_frame_patch] * self.maxtime_step, dim=1)
+                speed_queue = torch.cat([new_speed] * self.maxtime_step, dim=1)
+                steering_queue = torch.cat([new_steering] * self.maxtime_step, dim=1)
+                acceleration_queue = torch.cat(
+                    [new_acceleration] * self.maxtime_step, dim=1
                 )
-            )
-            # print(f"concat_results[{i}] shape: {concat_results[-1].shape}")
-        concat_tensor = torch.cat(concat_results, dim=1)
-        # print(f"concat_tensor shape: {concat_tensor.shape}")
+            else:
+                frame_queue = torch.cat((frame_queue[:, :-16], new_frame_patch), dim=1)
+                speed_queue = torch.cat((speed_queue[:, :-1], new_speed), dim=1)
+                steering_queue = torch.cat(
+                    (steering_queue[:, :-1], new_steering), dim=1
+                )
+                acceleration_queue = torch.cat(
+                    (acceleration_queue[:, :-1], new_acceleration), dim=1
+                )
 
-        if memory_tensor is None:
-            memory_tensor = concat_tensor[: self.memory_size]
-        # print(f"memory_tensor shape: {memory_tensor.shape}")
-        transformer_input = torch.cat((memory_tensor, concat_tensor), dim=1)
-        # print(f"transformer_input shape: {transformer_input.shape}")
-        steering, acceleration, new_memory_queue = self.transformer_block(
-            transformer_input, memory_size=self.memory_size
-        )
+        # 使用timer测量特征串联时间
+        if timer:
+            with timer.measure("特征串联"):
+                concat_results = []
+                time_steps = torch.arange(1, self.maxtime_step + 1, device=device)
+                for i in range(frame_queue.shape[1] // 15):
+                    speed_input = speed_queue[:, i]
+                    steering_input = steering_queue[:, i]
+                    acceleration_input = acceleration_queue[:, i]
+                    if speed_input.dim() == 1:
+                        speed_input = speed_input.unsqueeze(1)
+                    if steering_input.dim() == 1:
+                        steering_input = steering_input.unsqueeze(1)
+                    if acceleration_input.dim() == 1:
+                        acceleration_input = acceleration_input.unsqueeze(1)
+                    concat_results.append(
+                        self.concat(
+                            patch=frame_queue[:, i * 15 : i * 15 + 15],
+                            speed=speed_input,
+                            steering=steering_input,
+                            acceleration=acceleration_input,
+                            time_step=time_steps[i],
+                            mask_attr=(i == frame_queue.shape[1] // 15 - 1),
+                        )
+                    )
+                concat_tensor = torch.cat(concat_results, dim=1)
+        else:
+            concat_results = []
+            time_steps = torch.arange(1, self.maxtime_step + 1, device=device)
+            for i in range(frame_queue.shape[1] // 15):
+                speed_input = speed_queue[:, i]
+                steering_input = steering_queue[:, i]
+                acceleration_input = acceleration_queue[:, i]
+                if speed_input.dim() == 1:
+                    speed_input = speed_input.unsqueeze(1)
+                if steering_input.dim() == 1:
+                    steering_input = steering_input.unsqueeze(1)
+                if acceleration_input.dim() == 1:
+                    acceleration_input = acceleration_input.unsqueeze(1)
+                concat_results.append(
+                    self.concat(
+                        patch=frame_queue[:, i * 15 : i * 15 + 15],
+                        speed=speed_input,
+                        steering=steering_input,
+                        acceleration=acceleration_input,
+                        time_step=time_steps[i],
+                        mask_attr=(i == frame_queue.shape[1] // 15 - 1),
+                    )
+                )
+            concat_tensor = torch.cat(concat_results, dim=1)
+
+        # 使用timer测量内存队列管理时间
+        if timer:
+            with timer.measure("内存队列管理"):
+                if memory_tensor is None:
+                    memory_tensor = concat_tensor[: self.memory_size]
+                transformer_input = torch.cat((memory_tensor, concat_tensor), dim=1)
+        else:
+            if memory_tensor is None:
+                memory_tensor = concat_tensor[: self.memory_size]
+            transformer_input = torch.cat((memory_tensor, concat_tensor), dim=1)
+
+        # 使用timer测量Transformer处理时间
+        if timer:
+            with timer.measure("Transformer推理"):
+                steering, acceleration, new_memory_queue = self.transformer_block(
+                    transformer_input, memory_size=self.memory_size
+                )
+        else:
+            steering, acceleration, new_memory_queue = self.transformer_block(
+                transformer_input, memory_size=self.memory_size
+            )
 
         return (
             steering,

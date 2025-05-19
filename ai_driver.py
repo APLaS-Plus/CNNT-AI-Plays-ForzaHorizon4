@@ -126,6 +126,8 @@ class AIDriver:
         # Initialize memory queues for sequential prediction
         self.frame_queue = None
         self.speed_queue = None
+        self.steering_queue = None
+        self.acceleration_queue = None
         self.memory_queue = None
 
         # Control flags
@@ -206,6 +208,13 @@ class AIDriver:
             with self.timer.measure("屏幕捕获"):
                 digit_region, blue_bird_eye_view = self.cgl.get_currunt_key_region()
 
+            # cv2.imshow("Digit Region", digit_region)
+            # cv2.imshow("Blue Bird Eye View", blue_bird_eye_view)
+            # if cv2.waitKey(1) & 0xFF == ord("q"):
+            #     print("Exiting due to 'q' key press")
+            #     self.running = False
+            #     return 0.0, 0.0
+            
             # Detect speed from digit region
             with self.timer.measure("速度检测"):
                 speed = self.detect_speed(digit_region)
@@ -215,12 +224,19 @@ class AIDriver:
                 guideline_tensor = Image.fromarray(blue_bird_eye_view).convert("L")
                 transform = transforms.Compose(
                     [
-                        transforms.Resize((240, 136)),
+                        transforms.Resize((240, 144)),
                         transforms.ToTensor(),
                     ]
                 )
                 guideline_tensor = transform(guideline_tensor).unsqueeze(0)
                 guideline_tensor = guideline_tensor.to(self.device)
+
+            # 获取当前转向和加速度值作为输入，如果是初始状态则设为零
+            current_steering = torch.zeros(1, 1, device=self.device)
+            current_acceleration = torch.zeros(1, 1, device=self.device)
+            if self.steering_queue is not None and self.acceleration_queue is not None:
+                current_steering = self.steering_queue[:, -1].unsqueeze(1)
+                current_acceleration = self.acceleration_queue[:, -1].unsqueeze(1)
 
             # Model inference
             with self.timer.measure("模型推理"):
@@ -231,11 +247,17 @@ class AIDriver:
                         self.memory_queue,
                         self.frame_queue,
                         self.speed_queue,
+                        self.steering_queue,
+                        self.acceleration_queue,
                     ) = self.model(
                         self.frame_queue,
                         self.speed_queue,
+                        self.steering_queue,
+                        self.acceleration_queue,
                         guideline_tensor,
                         speed,
+                        current_steering,
+                        current_acceleration,
                         self.memory_queue,
                         device=self.device,
                         timer=self.timer,
@@ -286,7 +308,8 @@ class AIDriver:
                 if frame_count >= warmup_frames:
                     self.update_controller(steering, acceleration)
                     print(
-                        f"Frame {frame_count}: Speed: {self.speed_queue[:, -1].item():.1f}, Steering: {steering:.3f}, Acceleration: {acceleration:.3f}"
+                        f"Frame {frame_count}: Speed: {self.speed_queue[:, -1].item():.1f}, "
+                        f"Steering: {steering:.3f}, Acceleration: {acceleration:.3f}"
                     )
 
                 # Calculate processing time
