@@ -471,13 +471,11 @@ if __name__ == "__main__":
     num_workers = min(8, os.cpu_count() or 4)  # 使用合适数量的工作线程
     prefetch_factor = 2  # 预取因子
 
-    # 使用pin_memory加速GPU传输
     train_loader = DataLoader(
         train_dataset,
         batch_size=4,
         shuffle=True,
         num_workers=num_workers,
-        pin_memory=True,
         prefetch_factor=prefetch_factor,
     )
 
@@ -486,7 +484,6 @@ if __name__ == "__main__":
         batch_size=4,
         shuffle=True,
         num_workers=num_workers,
-        pin_memory=True,
         prefetch_factor=prefetch_factor,
     )
 
