@@ -3,6 +3,7 @@ import pathlib
 import sys
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
@@ -18,6 +19,31 @@ UTILS_DIR = str(UTILS_DIR.resolve())
 
 sys.path.append(UTILS_DIR)  # Add utils directory to path
 from utils.model.simplebaseline import SimpleBaselineModel
+
+
+class AdaptiveLoss(nn.Module):
+    """自适应损失，根据目标值的分布动态调整权重"""
+
+    def __init__(self, alpha=2.0):
+        super().__init__()
+        self.alpha = alpha
+
+    def forward(self, pred, target):
+        # 计算基础MSE损失
+        mse_loss = F.mse_loss(pred, target, reduction="none")
+
+        # 根据目标值的绝对值计算权重（绝对值越大，权重越高）
+        weights = 1.0 + self.alpha * torch.abs(target)
+
+        weighted_loss = weights * mse_loss
+        return weighted_loss.mean()
+
+
+def output_diversity_loss(pred, alpha=0.1):
+    """鼓励输出多样性的损失"""
+    # 计算预测值的标准差，鼓励更大的变化范围
+    std_loss = -torch.std(pred, dim=0).mean()
+    return alpha * std_loss
 
 
 class SimpleBaselineDataset(Dataset):
@@ -141,8 +167,10 @@ def train(
             pred_accel = outputs[:, 1:2]
 
             # 计算损失
-            steer_loss = criterion(pred_steering, steering_labels)
-            accel_loss = criterion(pred_accel, accel_labels)
+            steer_main_loss = criterion(pred_steering, steering_labels)
+            accel_main_loss = criterion(pred_accel, accel_labels)
+            steer_loss = steer_main_loss + output_diversity_loss(pred_steering)
+            accel_loss = accel_main_loss + output_diversity_loss(pred_accel)
             total_loss = steer_loss + accel_loss
 
             # 反向传播
@@ -189,8 +217,10 @@ def train(
                 pred_accel = outputs[:, 1:2]
 
                 # 计算损失
-                steer_loss = criterion(pred_steering, steering_labels)
-                accel_loss = criterion(pred_accel, accel_labels)
+                steer_main_loss = criterion(pred_steering, steering_labels)
+                accel__main_loss = criterion(pred_accel, accel_labels)
+                steer_loss = steer_main_loss + output_diversity_loss(pred_steering)
+                accel_loss = accel__main_loss + output_diversity_loss(pred_accel)
                 total_loss = steer_loss + accel_loss
 
                 val_loss += total_loss.item()
@@ -309,10 +339,10 @@ if __name__ == "__main__":
     if not os.path.exists(model_save_path):
         os.makedirs(model_save_path)
 
-    # Define image transformations
+    # Define image transformations - 将240x144转换为224x128
     transform = transforms.Compose(
         [
-            transforms.Resize((240, 144)),
+            transforms.Resize((224, 128)),  # 从240x144转换为224x128
             transforms.ToTensor(),
         ]
     )
@@ -336,7 +366,7 @@ if __name__ == "__main__":
     val_loader = DataLoader(
         val_dataset,
         batch_size=batch_size,
-        shuffle=False,
+        shuffle=True,
         num_workers=num_workers,
         pin_memory=True,
     )
@@ -347,12 +377,19 @@ if __name__ == "__main__":
     if len(train_dataset) > 0:
         print(f"Input image shape: {train_dataset[0][0].shape}")
 
-    # 创建SimpleBaseline模型
-    model = SimpleBaselineModel()
+    # 创建SimpleBaseline模型 - 使用224x128分辨率
+    model = SimpleBaselineModel(
+        img_size=(224, 128),  # 使用转换后的分辨率
+        patch_size=4,
+        window_size=7,  # 使用7作为窗口大小，Swin Transformer的标准配置
+        embed_dim=96,
+        depths=[2, 2, 6, 2],
+        num_heads=[3, 6, 12, 24]
+    )
 
-    # 使用相同的优化器配置
-    criterion = nn.MSELoss()
-    optimizer = optim.AdamW(model.parameters(), lr=0.001, weight_decay=1e-4)
+    # 使用相同的优化器配置，但调整学习率以适配Transformer
+    criterion = AdaptiveLoss(alpha=2.0)
+    optimizer = optim.AdamW(model.parameters(), lr=0.0001, weight_decay=1e-4)  # 降低学习率
 
     # 添加学习率调度器
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
