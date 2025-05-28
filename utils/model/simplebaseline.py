@@ -233,14 +233,13 @@ class SwinTransformerBlock(nn.Module):
             # if window size is larger than input resolution, we don't partition windows
             self.shift_size = 0
             self.window_size = min(self.input_resolution)
-        else:
-            # 确保window_size能被高度和宽度整除
-            h, w = self.input_resolution
-            while h % self.window_size != 0 or w % self.window_size != 0:
-                self.window_size -= 1
-                if self.window_size < 1:
-                    self.window_size = 1
-                    break
+
+        # 确保window_size能被高度和宽度整除
+        h, w = self.input_resolution
+        while (
+            h % self.window_size != 0 or w % self.window_size != 0
+        ) and self.window_size > 1:
+            self.window_size -= 1
 
         # 调整shift_size以匹配新的window_size
         if self.shift_size >= self.window_size:
@@ -318,40 +317,52 @@ class SwinTransformerBlock(nn.Module):
         x = self.norm1(x)
         x = x.view(B, H, W, C)
 
+        # 动态调整窗口大小
+        current_window_size = min(self.window_size, H, W)
+        current_shift_size = (
+            min(self.shift_size, current_window_size // 2)
+            if current_window_size > 1
+            else 0
+        )
+
         # cyclic shift
-        if self.shift_size > 0:
+        if current_shift_size > 0:
             shifted_x = torch.roll(
-                x, shifts=(-self.shift_size, -self.shift_size), dims=(1, 2)
+                x, shifts=(-current_shift_size, -current_shift_size), dims=(1, 2)
             )
         else:
             shifted_x = x
 
         # partition windows
         x_windows = window_partition(
-            shifted_x, self.window_size
+            shifted_x, current_window_size
         )  # nW*B, window_size, window_size, C
         x_windows = x_windows.view(
-            -1, self.window_size * self.window_size, C
+            -1, current_window_size * current_window_size, C
         )  # nW*B, window_size*window_size, C
 
         # W-MSA/SW-MSA (to be compatible for testing on images whose shapes are the multiple of window size
-        if self.input_resolution == x_size:
+        if current_window_size == self.window_size and self.input_resolution == (H, W):
             attn_windows = self.attn(
                 x_windows, mask=self.attn_mask
             )  # nW*B, window_size*window_size, C
         else:
-            attn_windows = self.attn(
-                x_windows, mask=self.calculate_mask(x_size).to(x.device)
-            )
+            if current_shift_size > 0:
+                attn_mask = self.calculate_mask((H, W))
+                attn_windows = self.attn(x_windows, mask=attn_mask.to(x.device))
+            else:
+                attn_windows = self.attn(x_windows, mask=None)
 
         # merge windows
-        attn_windows = attn_windows.view(-1, self.window_size, self.window_size, C)
-        shifted_x = window_reverse(attn_windows, self.window_size, H, W)  # B H' W' C
+        attn_windows = attn_windows.view(
+            -1, current_window_size, current_window_size, C
+        )
+        shifted_x = window_reverse(attn_windows, current_window_size, H, W)  # B H' W' C
 
         # reverse cyclic shift
-        if self.shift_size > 0:
+        if current_shift_size > 0:
             x = torch.roll(
-                shifted_x, shifts=(self.shift_size, self.shift_size), dims=(1, 2)
+                shifted_x, shifts=(current_shift_size, current_shift_size), dims=(1, 2)
             )
         else:
             x = shifted_x
@@ -593,7 +604,8 @@ class SimpleBaselineModel(nn.Module):
         x_size = (self.patches_resolution[0], self.patches_resolution[1])
         for layer in self.layers:
             x = layer(x, x_size)
-            x_size = (x_size[0] // 2, x_size[1] // 2)
+            if layer.downsample is not None:
+                x_size = (x_size[0] // 2, x_size[1] // 2)
 
         x = self.norm(x)  # B L C
         x = self.avgpool(x.transpose(1, 2))  # B C 1
