@@ -167,10 +167,12 @@ def train(
             pred_accel = outputs[:, 1:2]
 
             # 计算损失
-            steer_main_loss = criterion(pred_steering, steering_labels)
-            accel_main_loss = criterion(pred_accel, accel_labels)
-            steer_loss = steer_main_loss + output_diversity_loss(pred_steering)
-            accel_loss = accel_main_loss + output_diversity_loss(pred_accel)
+            # steer_main_loss = criterion(pred_steering, steering_labels)
+            # accel_main_loss = criterion(pred_accel, accel_labels)
+            # steer_loss = steer_main_loss + output_diversity_loss(pred_steering)
+            # accel_loss = accel_main_loss + output_diversity_loss(pred_accel)
+            steer_loss = criterion(pred_steering, steering_labels)
+            accel_loss = criterion(pred_accel, accel_labels)
             total_loss = steer_loss + accel_loss
 
             # 反向传播
@@ -361,14 +363,16 @@ if __name__ == "__main__":
         shuffle=True,
         num_workers=num_workers,
         pin_memory=True,
+        persistent_workers=True,
     )
 
     val_loader = DataLoader(
         val_dataset,
         batch_size=batch_size,
-        shuffle=True,
+        shuffle=False,
         num_workers=num_workers,
         pin_memory=True,
+        persistent_workers=True,
     )
 
     # Print dataset info
@@ -388,7 +392,7 @@ if __name__ == "__main__":
     )
 
     # 使用相同的优化器配置，但调整学习率以适配Transformer
-    criterion = AdaptiveLoss(alpha=2.0)
+    criterion = nn.MSELoss(alpha=2.0)
     optimizer = optim.AdamW(model.parameters(), lr=0.0001, weight_decay=1e-4)  # 降低学习率
 
     # 添加学习率调度器
