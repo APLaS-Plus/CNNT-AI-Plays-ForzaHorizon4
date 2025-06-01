@@ -80,25 +80,25 @@ class DigitDataset(Dataset):
 
         # Convert to grayscale
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        image = Image.fromarray(gray, mode="L")
+        # # Apply median filter to remove noise
+        # median = cv2.medianBlur(gray, 3)
 
-        # Apply median filter to remove noise
-        median = cv2.medianBlur(gray, 3)
+        # # Apply CLAHE (Contrast Limited Adaptive Histogram Equalization)
+        # clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        # enhanced = clahe.apply(median)
 
-        # Apply CLAHE (Contrast Limited Adaptive Histogram Equalization)
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        enhanced = clahe.apply(median)
+        # # Apply adaptive thresholding
+        # binary = cv2.adaptiveThreshold(
+        #     enhanced, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY, 15, 5
+        # )
 
-        # Apply adaptive thresholding
-        binary = cv2.adaptiveThreshold(
-            enhanced, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY, 15, 5
-        )
+        # # Morphological operations to enhance character contours
+        # kernel = np.ones((2, 2), np.uint8)
+        # morph = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
 
-        # Morphological operations to enhance character contours
-        kernel = np.ones((2, 2), np.uint8)
-        morph = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
-
-        # Convert processed image to PIL format
-        image = Image.fromarray(morph, mode="L")
+        # # Convert processed image to PIL format
+        # image = Image.fromarray(morph, mode="L")
 
         # Get label
         label = self.labels[idx]

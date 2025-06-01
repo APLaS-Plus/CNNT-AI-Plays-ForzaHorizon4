@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.transforms as transforms
-
+from .utils import GhostConv, CBAM, SimAM, Bottleneck
 
 class ConvBlock(nn.Module):
     """Lightweight convolutional block for feature extraction"""
@@ -17,11 +17,11 @@ class ConvBlock(nn.Module):
                 kernel_size,
                 stride,
                 padding,
-                groups=1 if in_channels < 4 else 2,
+                groups=1,
                 bias=False,  # 与批归一化配合使用时不需要偏置
             ),
             nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True),
+            nn.SiLU(inplace=True),
             nn.MaxPool2d(2),
         )
 
@@ -36,10 +36,10 @@ class DigitClassifier(nn.Module):
         super(DigitClassifier, self).__init__()
         # 优化分类器结构
         self.classifier = nn.Sequential(
-            nn.Linear(in_features, 32),
-            nn.ReLU(inplace=True),
-            nn.Dropout(0.2),
-            nn.Linear(32, num_classes),
+            nn.Linear(in_features, in_features * 2),
+            nn.SiLU(inplace=True),
+            nn.Dropout(0.1),
+            nn.Linear(in_features*2, num_classes),
         )
 
     def forward(self, x):
@@ -55,10 +55,25 @@ class LiteDigitDetector(nn.Module):
 
         # 更高效的特征提取网络
         self.features = nn.Sequential(
-            ConvBlock(1, 16),
-            ConvBlock(16, 32),
+            GhostConv(1, 16),
+            nn.Dropout(0.1),
+            SimAM(),
+            nn.MaxPool2d(2),
+            GhostConv(16, 32),
+            nn.Dropout(0.1),
+            SimAM(),
+            nn.MaxPool2d(2),
+            Bottleneck(32, 32),
+            nn.Dropout(0.1),
             ConvBlock(32, 64),
-            ConvBlock(64, 64),
+            nn.Dropout(0.1),
+            Bottleneck(64, 64),
+            nn.Dropout(0.1),
+            CBAM(64, kernel_size=7),
+            nn.Conv2d(64,64,2,2,0),
+            nn.BatchNorm2d(64),
+            nn.SiLU(inplace=True),
+            nn.Dropout(0.1),
         )
 
         # Calculate feature map dimensions after feature extraction

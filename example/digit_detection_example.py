@@ -28,6 +28,9 @@ def predict_with_model(model, image):
 
 def main():
     bg = time.time()
+    # 测试配置
+    NUM_TESTS = 100  # 测试次数
+    
     # 1. Load model
     model = LiteDigitDetector(input_height=48, input_width=96)
 
@@ -45,7 +48,7 @@ def main():
     load_model = time.time()
     print("Model loading time:", load_model - bg)
 
-    # 2. Load test image
+    # 2. Load test image (一次性加载)
     image_path = (
         ROOT_DIR / ".." / "testpng" / "night.jpg"
     )  # Modify to your test image path
@@ -59,54 +62,58 @@ def main():
         print("Error: Could not capture digit region")
         return
 
-    # Apply image preprocessing steps
-    # Apply median filter to remove noise
-    median = cv2.medianBlur(digit_region, 3)
+    # 3. 反复测试同一张图片
+    pil_loading_times = []
+    prediction_times = []
+    
+    print(f"开始进行 {NUM_TESTS} 次测试...")
+    
+    for i in range(NUM_TESTS):
+        # 测量PIL图片加载时间
+        pil_start = time.time()
+        pil_image = Image.fromarray(digit_region, mode="L")  # Convert to PIL image in grayscale mode
+        pil_end = time.time()
+        pil_loading_times.append(pil_end - pil_start)
+        
+        # 测量预测时间
+        predict_start = time.time()
+        digits_prediction = predict_with_model(model, pil_image)
+        predict_end = time.time()
+        prediction_times.append(predict_end - predict_start)
+        
+        # 显示进度
+        if (i + 1) % 20 == 0:
+            print(f"已完成 {i + 1}/{NUM_TESTS} 次测试")
 
-    # Apply CLAHE (Contrast Limited Adaptive Histogram Equalization)
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    enhanced = clahe.apply(median)
-
-    # Apply adaptive thresholding
-    binary = cv2.adaptiveThreshold(
-        enhanced, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY, 15, 5
-    )
-
-    # Morphological operations to enhance character contours
-    kernel = np.ones((2, 2), np.uint8)
-    morph = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
-
-    # Convert processed image to PIL format
-    pil_image = Image.fromarray(morph)
-
-    load_pil_image = time.time()
-    print("PIL image loading time:", load_pil_image - load_model)
-
-    # 3. Make prediction
-    bg_predict = time.time()
-    digits_prediction = predict_with_model(model, pil_image)
-    predict_img = time.time()
-    print("Prediction time:", predict_img - bg_predict)
+    # 计算平均时间
+    avg_pil_loading_time = np.mean(pil_loading_times)
+    avg_prediction_time = np.mean(prediction_times)
+    
+    print(f"\n=== 测试结果 (基于 {NUM_TESTS} 次测试) ===")
+    print(f"平均PIL图片加载时间: {avg_pil_loading_time:.6f} 秒")
+    print(f"平均预测时间: {avg_prediction_time:.6f} 秒")
+    print(f"PIL加载时间标准差: {np.std(pil_loading_times):.6f} 秒")
+    print(f"预测时间标准差: {np.std(prediction_times):.6f} 秒")
+    
+    # 显示最后一次预测结果
+    print(f"\n最后一次预测结果:")
     print(f"Predicted three digits: {digits_prediction}")
-    print(
-        f"Combined digit value: {digits_prediction[0] * 100 + digits_prediction[1] * 10 + digits_prediction[2]}"
-    )
-
-    # Calculate the value of the three-digit number
     numeric_value = (
         100 * digits_prediction[0] + 10 * digits_prediction[1] + digits_prediction[2]
     )
     print(f"Predicted combined digit value: {numeric_value}")
 
     ed = time.time()
-    print("Total execution time:", ed - bg)
-    # Display the captured digit region
+    print(f"\n总执行时间: {ed - bg:.3f} 秒")
+    
+    # Display the captured digit region (只显示一次)
+    pil_image = Image.fromarray(digit_region, mode="L")
     plt.figure(figsize=(8, 4))
     plt.subplot(1, 2, 1)
     plt.imshow(img, cmap="gray")
     plt.title("Original Image")
     plt.subplot(1, 2, 2)
-    plt.imshow(morph, cmap="gray")
+    plt.imshow(pil_image, cmap="gray")
     plt.title("Captured Digit Region")
     plt.tight_layout()
     plt.show()

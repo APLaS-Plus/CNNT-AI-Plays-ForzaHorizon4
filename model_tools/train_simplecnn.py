@@ -18,37 +18,12 @@ UTILS_DIR = ROOT_DIR / ".."
 UTILS_DIR = str(UTILS_DIR.resolve())
 
 sys.path.append(UTILS_DIR)  # Add utils directory to path
-from utils.model.simplebaseline import SimpleBaselineModel
+from utils.model.simpleCNNbaseline import SimpleCNNBaseline
 
 
-# class AdaptiveLoss(nn.Module):
-#     """自适应损失，根据目标值的分布动态调整权重"""
-
-#     def __init__(self, alpha=2.0):
-#         super().__init__()
-#         self.alpha = alpha
-
-#     def forward(self, pred, target):
-#         # 计算基础MSE损失
-#         mse_loss = F.mse_loss(pred, target, reduction="none")
-
-#         # 根据目标值的绝对值计算权重（绝对值越大，权重越高）
-#         weights = 1.0 + self.alpha * torch.abs(target)
-
-#         weighted_loss = weights * mse_loss
-#         return weighted_loss.mean()
-
-
-# def output_diversity_loss(pred, alpha=0.1):
-#     """鼓励输出多样性的损失"""
-#     # 计算预测值的标准差，鼓励更大的变化范围
-#     std_loss = -torch.std(pred, dim=0).mean()
-#     return alpha * std_loss
-
-
-class SimpleBaselineDataset(Dataset):
+class SimpleCNNDataset(Dataset):
     """
-    SimpleBaseline Dataset for frame-by-frame training (no sequences)
+    SimpleCNN Dataset for frame-by-frame training (no sequences)
 
     Expected dataset structure:
     - Multiple datasets in data_n/train and data_n/val
@@ -95,7 +70,7 @@ class SimpleBaselineDataset(Dataset):
         img_path = self.image_files[idx]
 
         # Load image
-        image = Image.open(img_path).convert("L")  # Grayscale
+        image = Image.open(img_path).convert("RGB")
         if self.transform:
             image = self.transform(image)
 
@@ -128,7 +103,7 @@ def train(
     model_save_path=None,
 ):
     """
-    Train the SimpleBaseline model with frame-by-frame data
+    Train the SimpleCNN model with frame-by-frame data
     """
     model = model.to(device)
     best_val_loss = float("inf")
@@ -244,9 +219,7 @@ def train(
         # 保存最佳模型
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            torch.save(
-                model.state_dict(), str(model_save_path / "best_baseline_model.pth")
-            )
+            torch.save(model.state_dict(), str(model_save_path / "best_cnn_model.pth"))
             print(f"Model saved with validation loss: {val_loss:.4f}")
             counter = 0
         else:
@@ -311,7 +284,7 @@ def plot_training_history(history, model_save_path=None):
     plt.title("Acceleration Loss")
 
     plt.tight_layout()
-    plt.savefig(str(model_save_path / "baseline_training_history.png"))
+    plt.savefig(str(model_save_path / "cnn_training_history.png"))
     plt.show()
 
 
@@ -331,25 +304,25 @@ if __name__ == "__main__":
 
     print(f"Found {len(data_dirs)} data directories: {data_dirs}")
 
-    model_save_path = ROOT_DIR / ".." / "run" / "baseline"
+    model_save_path = ROOT_DIR / ".." / "run" / "cnn"
     if not os.path.exists(model_save_path):
         os.makedirs(model_save_path)
 
-    # Define image transformations - 将240x144转换为224x128
+    # Define image transformations
     transform = transforms.Compose(
         [
-            transforms.Resize((224, 128)),  # 从240x144转换为224x128
+            transforms.Resize((640, 960)),  # 保持原始分辨率640*960
             transforms.ToTensor(),
         ]
     )
 
     # 创建数据集和数据加载器
-    train_dataset = SimpleBaselineDataset(data_dirs, transform=transform, split="train")
-    val_dataset = SimpleBaselineDataset(data_dirs, transform=transform, split="val")
+    train_dataset = SimpleCNNDataset(data_dirs, transform=transform, split="train")
+    val_dataset = SimpleCNNDataset(data_dirs, transform=transform, split="val")
 
     # 数据加载器配置
     num_workers = min(8, os.cpu_count() or 4)
-    batch_size = 32  # 可以使用更大的batch size，因为不需要处理序列
+    batch_size = 64  # 可以使用更大的batch size
 
     train_loader = DataLoader(
         train_dataset,
@@ -373,19 +346,14 @@ if __name__ == "__main__":
     if len(train_dataset) > 0:
         print(f"Input image shape: {train_dataset[0][0].shape}")
 
-    # 创建SimpleBaseline模型 - 使用224x128分辨率
-    model = SimpleBaselineModel(
-        img_size=(224, 128),  # 使用转换后的分辨率
-        patch_size=4,
-        window_size=7,  # 使用7作为窗口大小，Swin Transformer的标准配置
-        embed_dim=96,
-        depths=[2, 2, 6, 2],
-        num_heads=[3, 6, 12, 24]
-    )
+    # 创建SimpleCNN模型 - 使用960*640分辨率
+    model = SimpleCNNBaseline(input_w=960, input_h=640)
 
-    # 使用相同的优化器配置，但调整学习率以适配Transformer
-    criterion = nn.HuberLoss(delta=0.2, reduction="mean")
-    optimizer = optim.AdamW(model.parameters(), lr=0.00001, weight_decay=1e-5)  # 降低学习率
+    # 使用相同的优化器配置
+    criterion = nn.HuberLoss(delta=0.1, reduction="mean")
+    optimizer = optim.AdamW(
+        model.parameters(), lr=0.0001, weight_decay=1e-4
+    )  # CNN可以使用更高的学习率
 
     # 添加学习率调度器
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
@@ -413,5 +381,5 @@ if __name__ == "__main__":
     plot_training_history(history, model_save_path)
 
     # 保存最终模型
-    torch.save(model.state_dict(), str(model_save_path / "final_baseline_model.pth"))
+    torch.save(model.state_dict(), str(model_save_path / "final_cnn_model.pth"))
     print("Training completed, final model saved")

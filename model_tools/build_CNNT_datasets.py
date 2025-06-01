@@ -125,14 +125,14 @@ def main(cgl, monitor, keyboardmonitor, RAW_DATA_DIR):
     while True:
         # get digit region and blue bird eye view
         begin_of_get_frame = time.time()
-        digit_region, blue_bird_eye_view = cgl.get_currunt_key_region()
+        digit_region, adjusted_view = cgl.get_currunt_key_region()
         # cv2.imshow("digit_region", digit_region)
         # cv2.imshow("blue_bird_eye_view", blue_bird_eye_view)
         # if cv2.waitKey(1) & 0xFF == ord("q"):
         #     break
 
         # save the frame and control state
-        cv2.imwrite(str(RAW_DATA_DIR / f"{frame_label}.jpg"), blue_bird_eye_view)
+        cv2.imwrite(str(RAW_DATA_DIR / f"{frame_label}.jpg"), adjusted_view)
         cv2.imwrite(str(digit_data_dir / f"{frame_label}.jpg"), digit_region)
         with open(RAW_DATA_DIR / f"{frame_label}.txt", "w") as f:
             f.write(

@@ -3,7 +3,10 @@
 /run/*
 test.py
 test2.py
-/model/easyocr/*
+/model/easyocr/
+/model/CNNT/*.pth
+/model/SimpleBaseline/*.pth
+
 # ---> Python
 # Byte-compiled / optimized / DLL files
 __pycache__/
