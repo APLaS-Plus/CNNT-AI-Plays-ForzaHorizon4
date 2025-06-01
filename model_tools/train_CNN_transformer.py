@@ -25,18 +25,56 @@ from utils.model.CNN_transformer import CNNViT
 def correlation_loss(a, s):
     a = a.view(-1)
     s = s.view(-1)
+
+    # 添加更严格的数值稳定性检查
+    if len(a) < 2:
+        return torch.tensor(0.0, device=a.device)
+
     a_mean = a.mean()
     s_mean = s.mean()
-    cov = ((a - a_mean) * (s - s_mean)).mean()
+
+    # 检查标准差
     a_std = a.std()
     s_std = s.std()
-    corr = cov / (a_std * s_std + 1e-6)
-    return 1 - corr  # 越相关损失越小
+
+    # 如果标准差太小，返回0损失
+    if a_std < 1e-8 or s_std < 1e-8:
+        return torch.tensor(0.0, device=a.device)
+
+    cov = ((a - a_mean) * (s - s_mean)).mean()
+    corr = cov / (a_std * s_std)
+
+    # 限制相关系数范围并检查nan
+    corr = torch.clamp(corr, -0.99, 0.99)
+    if torch.isnan(corr) or torch.isinf(corr):
+        return torch.tensor(0.0, device=a.device)
+
+    return 1 - corr
 
 
 def independence_loss(a, s):
-    # 最简单的反相关性
-    return torch.abs(torch.corrcoef(torch.stack([a.view(-1), s.view(-1)]))[0, 1])
+    a = a.view(-1)
+    s = s.view(-1)
+
+    # 检查输入有效性
+    if len(a) < 2 or torch.isnan(a).any() or torch.isnan(s).any():
+        return torch.tensor(0.0, device=a.device)
+
+    # 检查标准差
+    if a.std() < 1e-8 or s.std() < 1e-8:
+        return torch.tensor(0.0, device=a.device)
+
+    try:
+        corr_matrix = torch.corrcoef(torch.stack([a, s]))
+        corr_val = corr_matrix[0, 1]
+
+        if torch.isnan(corr_val) or torch.isinf(corr_val):
+            return torch.tensor(0.0, device=a.device)
+
+        return torch.abs(corr_val)
+    except:
+        # 如果计算失败，返回0
+        return torch.tensor(0.0, device=a.device)
 
 
 class AccelerationSteeringLoss(nn.Module):
@@ -413,7 +451,7 @@ if __name__ == "__main__":
     model = CNNViT()
 
     # 同步CNN的优化器配置
-    criterion = AccelerationSteeringLoss()  # 使用自定义损失函数
+    criterion = AccelerationSteeringLoss(corr_weight=0.8,indep_weight=0.6)  # 使用自定义损失函数
     optimizer = optim.AdamW(
         model.parameters(), lr=0.0001, weight_decay=1e-4
     )  # 提高学习率到0.0001，权重衰减改为1e-4
