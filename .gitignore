@@ -6,6 +6,8 @@ test2.py
 /model/easyocr/
 /model/CNNT/*.pth
 /model/SimpleBaseline/*.pth
+/model/CNN_transformer/*.pth
+
 
 # ---> Python
 # Byte-compiled / optimized / DLL files

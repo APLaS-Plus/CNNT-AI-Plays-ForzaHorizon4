@@ -1,3 +1,6 @@
+"""
+Thanks the code from Ultralytics YOLO11 repository.
+"""
 import torch
 import torch.nn as nn
 import torch.nn.functional as F

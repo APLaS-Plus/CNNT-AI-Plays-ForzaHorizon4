@@ -92,9 +92,9 @@ class AIDriverSimpleCNN:
         self.digit_detector = LiteDigitDetector(input_height=48, input_width=96)
         self.load_digit_detector()
 
-        # Initialize SimpleCNN model with 240x144 input size
+        # Initialize SimpleCNN model with 960*640 input size
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-        self.model = SimpleCNNBaseline(input_w=240, input_h=144)
+        self.model = SimpleCNNBaseline(input_w=960, input_h=640)
         self.load_simplecnn_model()
 
         # Control flags
@@ -175,7 +175,7 @@ class AIDriverSimpleCNN:
         with self.timer.measure("总处理时间"):
             # Get current state from screen
             with self.timer.measure("屏幕捕获"):
-                digit_region, blue_bird_eye_view = self.cgl.get_currunt_key_region()
+                digit_region, adjusted_frame = self.cgl.get_currunt_key_region()
 
             # Detect speed from digit region
             with self.timer.measure("速度检测"):
@@ -183,10 +183,10 @@ class AIDriverSimpleCNN:
 
             # Convert guideline image for model input - 保持240x144分辨率
             with self.timer.measure("图像预处理"):
-                guideline_tensor = Image.fromarray(blue_bird_eye_view).convert("L")
+                guideline_tensor = Image.fromarray(adjusted_frame).convert("RGB")
                 transform = transforms.Compose(
                     [
-                        transforms.Resize((144, 240)),  # 保持原始分辨率
+                        transforms.Resize((640, 960)),  # 保持原始分辨率
                         transforms.ToTensor(),
                     ]
                 )
@@ -261,8 +261,8 @@ class AIDriverSimpleCNN:
                 self.frame_times.append(process_time)
 
                 # Sleep to maintain target frame rate (20fps = 0.05s per frame)
-                if process_time < 0.05:
-                    time.sleep(0.05 - process_time)
+                if process_time < 0.02:
+                    time.sleep(0.02 - process_time)
 
                 # 每100帧打印一次耗时统计
                 if frame_count > 0 and frame_count % 100 == 0:
