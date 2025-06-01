@@ -4,6 +4,7 @@ import sys
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
@@ -336,8 +337,10 @@ if __name__ == "__main__":
         os.makedirs(model_save_path)
 
     # Define image transformations - 将240x144转换为224x128
+    # Define image transformations - 将240x144转换为224x128
     transform = transforms.Compose(
         [
+            transforms.Resize((224, 128)),  # 从240x144转换为224x128
             transforms.Resize((224, 128)),  # 从240x144转换为224x128
             transforms.ToTensor(),
         ]
