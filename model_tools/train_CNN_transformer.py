@@ -453,7 +453,7 @@ if __name__ == "__main__":
     # 同步CNN的优化器配置
     criterion = AccelerationSteeringLoss(corr_weight=0.8,indep_weight=0.6)  # 使用自定义损失函数
     optimizer = optim.AdamW(
-        model.parameters(), lr=0.0001, weight_decay=1e-4
+        model.parameters(), lr=0.00005, weight_decay=1e-4
     )  # 提高学习率到0.0001，权重衰减改为1e-4
 
     # 添加学习率调度器
