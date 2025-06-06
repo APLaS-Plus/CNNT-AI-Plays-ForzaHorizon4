@@ -202,70 +202,43 @@ class CNNViTBlock(nn.Module):
         super(CNNViTBlock, self).__init__()
         self.input_w = input_w
         self.input_h = input_h
-        self.embedding_dim1 = embedding_dim
+        self.embedding_dim = embedding_dim
 
-        if self.embedding_dim1 % num_heads != 0:
+        if self.embedding_dim % num_heads != 0:
             raise ValueError(
-                f"embedding_dim1 ({self.embedding_dim1}) must be divisible by num_heads ({num_heads})"
+                f"embedding_dim1 ({self.embedding_dim}) must be divisible by num_heads ({num_heads})"
             )
 
         # Feature extractor
         self.feature_extractor = Feature_extractor(
-            input_w, input_h, self.embedding_dim1
+            input_w, input_h, self.embedding_dim
         )
 
         # Image encoder
         patch_w = 3
         patch_h = 2
-        self.image_encoder = VitImageEncoder(patch_w, patch_h, self.embedding_dim1)
+        self.image_encoder = VitImageEncoder(patch_w, patch_h, self.embedding_dim)
 
         # Single encoder for speed, 1 -> 2, embedding_dim1
-        self.speed_encoder = SingleEncoder(2, self.embedding_dim1)
+        self.speed_encoder = SingleEncoder(2, self.embedding_dim)
 
         # Transformer blocks1
-        self.transformer_blocks1 = nn.ModuleList(
+        self.transformer_blocks = nn.ModuleList(
             [
                 nn.Sequential(
-                    TransformerBlock(self.embedding_dim1, num_heads),
-                    GLU(self.embedding_dim1, self.embedding_dim1),
+                    TransformerBlock(self.embedding_dim, num_heads),
+                    GLU(self.embedding_dim, self.embedding_dim),
                 )
                 for _ in range(num_of_simgle_layers)
             ]
         )
 
-        # Downsample1: 8, embedding_dim1 -> 4, embedding_dim1//2
-        self.downsample1_1 = nn.Conv1d(self.embedding_dim1, self.embedding_dim1, 2, 2)
-        self.downsample1_2 = nn.Sequential(
-            nn.LayerNorm(self.embedding_dim1),
+        # Downsample1: 8, embedding_dim -> 4, embedding_dim//2
+        self.downsample1 = nn.Conv1d(self.embedding_dim, self.embedding_dim, 4, 4)
+        self.downsample2 = nn.Sequential(
+            nn.LayerNorm(self.embedding_dim),
             nn.GELU(),
-            nn.Linear(self.embedding_dim1, self.embedding_dim1 // 2),
-            nn.GELU(),
-        )
-
-        # Transformer blocks2
-        self.embedding_dim2 = self.embedding_dim1 // 2
-
-        if self.embedding_dim2 % num_heads != 0:
-            raise ValueError(
-                f"embedding_dim2 ({self.embedding_dim2}) must be divisible by num_heads ({num_heads})"
-            )
-
-        self.transformer_blocks2 = nn.ModuleList(
-            [
-                nn.Sequential(
-                    TransformerBlock(self.embedding_dim2, num_heads),
-                    GLU(self.embedding_dim2, self.embedding_dim2),
-                )
-                for _ in range(num_of_simgle_layers)
-            ]
-        )
-
-        # Downsample2: 4, embedding_emb2 -> 2, embedding_emb2//2
-        self.downsample2_1 = nn.Conv1d(self.embedding_dim2, self.embedding_dim2, 2, 2)
-        self.downsample2_2 = nn.Sequential(
-            nn.LayerNorm(self.embedding_dim2),
-            nn.GELU(),
-            nn.Linear(self.embedding_dim2, self.embedding_dim2 // 2),
+            nn.Linear(self.embedding_dim, self.embedding_dim // 4),
             nn.GELU(),
         )
 
@@ -276,21 +249,13 @@ class CNNViTBlock(nn.Module):
         combined_token = torch.cat([img_features, speed_tokens], dim=1)
 
         output = combined_token
-        for block in self.transformer_blocks1:
+        for block in self.transformer_blocks:
             output = block(output)
 
         output = output.transpose(1, 2)
-        output = self.downsample1_1(output)
+        output = self.downsample1(output)
         output = output.transpose(1, 2)
-        output = self.downsample1_2(output)
-
-        for block in self.transformer_blocks2:
-            output = block(output)
-
-        output = output.transpose(1, 2)
-        output = self.downsample2_1(output)
-        output = output.transpose(1, 2)
-        output = self.downsample2_2(output)
+        output = self.downsample2(output)
 
         return output
 
@@ -348,7 +313,7 @@ class CNN_Transformer(nn.Module):
             torch.randn(1, self.tokens_len, self.embed_dim)
         )
 
-        self.timetransformer1 = nn.ModuleList(
+        self.timetransformer = nn.ModuleList(
             [
                 nn.Sequential(
                     TransformerBlock(self.embed_dim, self.num_heads),
@@ -358,18 +323,7 @@ class CNN_Transformer(nn.Module):
             ]
         )
 
-        self.downsample1 = ResDownsample(self.embed_dim)
-
-        # 64 tokens, 256 dim
-        self.timetransformer2 = nn.ModuleList(
-            [
-                nn.Sequential(
-                    TransformerBlock(self.embed_dim, self.num_heads),
-                    GLU(self.embed_dim, self.embed_dim),
-                )
-                for _ in range(self.num_layers)
-            ]
-        )
+        self.downsample = ResDownsample(self.embed_dim)
 
         self.acc_branch1 = nn.Sequential(
             nn.Linear(self.tokens_len // 2, self.tokens_len),
@@ -435,19 +389,11 @@ class CNN_Transformer(nn.Module):
         new_feature = feature_queue
 
         feature_queue = feature_queue + self.timepositional_embedding
-        for block in self.timetransformer1:
+        for block in self.timetransformer:
             feature_queue = block(feature_queue)
 
         feature_queue = feature_queue.transpose(1, 2)  # batch, 256, 128
-        feature_queue = self.downsample1(feature_queue)
-        feature_queue = feature_queue.transpose(1, 2)
-
-        # feature_queue: batch, 64, 256
-        for block in self.timetransformer2:
-            feature_queue = block(feature_queue)
-
-        # feature_queue: batch, 256, 64
-        feature_queue = feature_queue.transpose(1, 2)
+        feature_queue = self.downsample(feature_queue)  # feature_queue: batch, 256, 64
 
         # Speed branch
         acc_branch = self.acc_branch1(feature_queue)  # batch, 256, 1

@@ -76,13 +76,46 @@ def independence_loss(a, s):
         return torch.tensor(0.0, device=a.device)
 
 
+def pearson_correlation_loss(y_pred, y_true):
+    """
+    计算皮尔逊相关系数损失
+    Args:
+        y_pred: 预测值 tensor
+        y_true: 真实值 tensor
+    Returns:
+        loss: 1 - |r| 作为损失值（值越小相关性越强）
+    """
+    # 计算均值
+    mean_pred = torch.mean(y_pred)
+    mean_true = torch.mean(y_true)
+
+    # 计算协方差和方差
+    cov = torch.mean((y_pred - mean_pred) * (y_true - mean_true))
+    var_pred = torch.mean((y_pred - mean_pred) ** 2)
+    var_true = torch.mean((y_true - mean_true) ** 2)
+
+    # 计算皮尔逊相关系数
+    correlation = cov / (torch.sqrt(var_pred * var_true) + 1e-8)
+
+    # 作为损失函数：1 - |r|，使相关性越强损失越小
+    loss = 1 - torch.abs(correlation)
+
+    return loss
+
+
 class SequentialAccelerationSteeringLoss(nn.Module):
-    def __init__(self, corr_weight=1.0, indep_weight=1.0):
+    def __init__(self, corr_weight=1.0, indep_weight=1.0, pearson_weight=1.0):
         super(SequentialAccelerationSteeringLoss, self).__init__()
         self.mse = nn.MSELoss()
         self.corr_weight = corr_weight
         self.indep_weight = indep_weight
-
+        self.pearson_weight = pearson_weight
+        if corr_weight < 0 or indep_weight < 0 or pearson_weight < 0:
+            raise ValueError(
+                "Weights must be non-negative. Received: "
+                f"corr_weight={corr_weight}, indep_weight={indep_weight}, pearson_weight={pearson_weight}"
+            )
+        
     def forward(self, pred_steering, pred_accel, target_steering, target_accel):
         """
         适配序列数据的损失函数
@@ -107,11 +140,18 @@ class SequentialAccelerationSteeringLoss(nn.Module):
         # Independence loss - 计算预测值之间的独立性
         indep_loss = independence_loss(pred_steering, pred_accel)
 
+        # Pearson correlation loss - 计算预测值与目标值之间的相关性
+        steer_pearson_loss = pearson_correlation_loss(
+            pred_steering, target_steering
+        )
+        accel_pearson_loss = pearson_correlation_loss(pred_accel, target_accel)
+        
         total_loss = (
             steer_loss
             + accel_loss
             + self.corr_weight * corr_loss
             + self.indep_weight * indep_loss
+            + self.pearson_weight * (steer_pearson_loss + accel_pearson_loss)
         )
 
         return total_loss, steer_loss, accel_loss
@@ -124,16 +164,18 @@ class SequentialCNNDataset(Dataset):
     Each batch contains sequential frames, and we predict the last frame's steering and acceleration
     """
 
-    def __init__(self, root_dirs, batch_size=64, transform=None, split="train"):
+    def __init__(self, root_dirs, batch_size=64, transform=None, split="train", frame_skip=1):
         """
         Args:
             root_dirs (list): List of dataset root directories (data_1, data_2, etc.)
             batch_size (int): Number of sequential frames in each batch
             transform (callable, optional): Image transformations
             split (str): 'train' or 'val'
+            frame_skip (int): Skip every N frames (1 means skip every other frame for 10fps from 20fps)
         """
         self.transform = transform
         self.batch_size = batch_size
+        self.frame_skip = frame_skip + 1  # +1 because we want to take every (frame_skip+1)th frame
 
         # Collect all image files from all data directories
         self.all_sequences = []
@@ -154,6 +196,9 @@ class SequentialCNNDataset(Dataset):
                 key=lambda x: int(os.path.splitext(x)[0]),
             )
 
+            # Apply frame skipping to reduce from 20fps to 10fps
+            img_files = img_files[::self.frame_skip]
+            
             # Create sequences of batch_size length
             img_paths = [os.path.join(data_dir, f) for f in img_files]
 
@@ -163,7 +208,7 @@ class SequentialCNNDataset(Dataset):
                 self.all_sequences.append(sequence)
 
         print(
-            f"Created {split} dataset with {len(self.all_sequences)} sequences of length {batch_size}"
+            f"Created {split} dataset with {len(self.all_sequences)} sequences of length {batch_size} (frame_skip={frame_skip}, effective fps=10)"
         )
 
     def __len__(self):
@@ -260,7 +305,7 @@ def train(
     }
 
     # Early stopping parameters
-    patience = 15
+    patience = 5
     counter = 0
 
     for epoch in range(num_epochs):
@@ -507,15 +552,15 @@ if __name__ == "__main__":
     )
 
     # Model parameters
-    batch_size = 64  # Sequence length
-    dataloader_batch_size = 4  # Number of sequences per batch
+    batch_size = 40  # Sequence length
+    dataloader_batch_size = 1  # Number of sequences per batch
 
-    # 创建数据集和数据加载器
+    # 创建数据集和数据加载器，使用frame_skip=1来实现10fps采样
     train_dataset = SequentialCNNDataset(
-        data_dirs, batch_size=batch_size, transform=transform, split="train"
+        data_dirs, batch_size=batch_size, transform=transform, split="train", frame_skip=1
     )
     val_dataset = SequentialCNNDataset(
-        data_dirs, batch_size=batch_size, transform=transform, split="val"
+        data_dirs, batch_size=batch_size, transform=transform, split="val", frame_skip=1
     )
 
     # 数据加载器配置
@@ -556,7 +601,7 @@ if __name__ == "__main__":
     )
 
     # 使用自定义序列损失函数，与train_CNN_transformer.py相同的权重配置
-    criterion = SequentialAccelerationSteeringLoss(corr_weight=0.8, indep_weight=0.6)
+    criterion = SequentialAccelerationSteeringLoss(corr_weight=0.8, indep_weight=0.6, pearson_weight=2)
     optimizer = optim.AdamW(
         model.parameters(),
         lr=0.00005,
