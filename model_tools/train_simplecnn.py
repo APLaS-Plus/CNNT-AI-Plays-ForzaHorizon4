@@ -94,9 +94,18 @@ def pearson_correlation_loss(y_pred, y_true):
     var_pred = torch.mean((y_pred - mean_pred) ** 2)
     var_true = torch.mean((y_true - mean_true) ** 2)
 
+    # 检查方差是否为零
+    if var_pred < 1e-8 or var_true < 1e-8:
+        return torch.tensor(0.0, device=y_pred.device)
+
     # 计算皮尔逊相关系数
     correlation = cov / (torch.sqrt(var_pred * var_true) + 1e-8)
 
+    # 限制相关系数范围并检查nan
+    correlation = torch.clamp(correlation, -0.99, 0.99)
+    if torch.isnan(correlation) or torch.isinf(correlation):
+        return torch.tensor(0.0, device=y_pred.device)
+    
     # 作为损失函数：1 - |r|，使相关性越强损失越小
     loss = 1 - torch.abs(correlation)
 
@@ -106,16 +115,17 @@ def pearson_correlation_loss(y_pred, y_true):
 class SequentialAccelerationSteeringLoss(nn.Module):
     def __init__(self, corr_weight=1.0, indep_weight=1.0, pearson_weight=1.0):
         super(SequentialAccelerationSteeringLoss, self).__init__()
-        self.mse = nn.MSELoss()
-        self.corr_weight = corr_weight
-        self.indep_weight = indep_weight
-        self.pearson_weight = pearson_weight
         if corr_weight < 0 or indep_weight < 0 or pearson_weight < 0:
             raise ValueError(
                 "Weights must be non-negative. Received: "
                 f"corr_weight={corr_weight}, indep_weight={indep_weight}, pearson_weight={pearson_weight}"
             )
-        
+            
+        self.mse = nn.MSELoss()
+        self.corr_weight = corr_weight
+        self.indep_weight = indep_weight
+        self.pearson_weight = pearson_weight
+
     def forward(self, pred_steering, pred_accel, target_steering, target_accel):
         """
         适配序列数据的损失函数
@@ -145,7 +155,7 @@ class SequentialAccelerationSteeringLoss(nn.Module):
             pred_steering, target_steering
         )
         accel_pearson_loss = pearson_correlation_loss(pred_accel, target_accel)
-        
+
         total_loss = (
             steer_loss
             + accel_loss
