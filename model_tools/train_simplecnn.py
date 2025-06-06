@@ -295,13 +295,13 @@ def train(
                     img = images_seq[frame_idx : frame_idx + 1]  # [1, 3, H, W]
                     speed = speeds_seq[frame_idx : frame_idx + 1]  # [1]
 
-                    speed_output, steering_output, feature_queue = model(
+                    acc_output, steering_output, feature_queue = model(
                         img, speed, feature_queue
                     )
 
                 # Only use the prediction from the last frame
                 sequence_steering_preds.append(steering_output.squeeze())  # 标量
-                sequence_accel_preds.append(speed_output.squeeze())  # 标量
+                sequence_accel_preds.append(acc_output.squeeze())  # 标量
 
             # Stack predictions
             pred_steering = torch.stack(sequence_steering_preds)  # [num_sequences]
@@ -364,13 +364,13 @@ def train(
                         img = images_seq[frame_idx : frame_idx + 1]
                         speed = speeds_seq[frame_idx : frame_idx + 1]
 
-                        speed_output, steering_output, feature_queue = model(
+                        acc_output, steering_output, feature_queue = model(
                             img, speed, feature_queue
                         )
 
                     # Only use the prediction from the last frame
                     sequence_steering_preds.append(steering_output.squeeze())
-                    sequence_accel_preds.append(speed_output.squeeze())
+                    sequence_accel_preds.append(acc_output.squeeze())
 
                 # Stack predictions
                 pred_steering = torch.stack(sequence_steering_preds)
@@ -519,7 +519,7 @@ if __name__ == "__main__":
     )
 
     # 数据加载器配置
-    num_workers = min(8, os.cpu_count() or 2)  # Reduce workers for memory efficiency
+    num_workers = min(16, os.cpu_count() or 2)  # Reduce workers for memory efficiency
 
     train_loader = DataLoader(
         train_dataset,

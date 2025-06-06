@@ -296,11 +296,11 @@ class CNNViTBlock(nn.Module):
 
 
 class ResDownsample(nn.Module):
-    def __init__(self, embed_dim, kernel_size=4, stride=1):
+    def __init__(self, embed_dim, kernel_size=5, stride=1, padding=2):
         super(ResDownsample, self).__init__()
         self.embed_dim = embed_dim
         self.conv = nn.Conv1d(
-            self.embed_dim, self.embed_dim, kernel_size, stride, kernel_size // 2
+            self.embed_dim, self.embed_dim, kernel_size, stride, padding
         )
         self.norm = nn.BatchNorm1d(self.embed_dim)
         self.activation = nn.GELU()
@@ -372,7 +372,7 @@ class CNN_Transformer(nn.Module):
         )
 
         self.acc_branch1 = nn.Sequential(
-            nn.Linear(self.tokens_len // 4, self.tokens_len),
+            nn.Linear(self.tokens_len // 2, self.tokens_len),
             nn.GELU(),
             nn.Linear(self.tokens_len, 1),
         )
@@ -383,7 +383,7 @@ class CNN_Transformer(nn.Module):
         )
 
         self.steering_branch1 = nn.Sequential(
-            nn.Linear(self.tokens_len // 4, self.tokens_len),
+            nn.Linear(self.tokens_len // 2, self.tokens_len),
             nn.GELU(),
             nn.Linear(self.tokens_len, 1),
         )
@@ -399,7 +399,7 @@ class CNN_Transformer(nn.Module):
             nn.Linear(self.embed_dim * 2, self.embed_dim),
         )
 
-        self.speed_outputlayer = nn.Sequential(
+        self.acc_outputlayer = nn.Sequential(
             nn.Linear(self.embed_dim, 1),
             nn.Tanh(),
         )
@@ -450,9 +450,9 @@ class CNN_Transformer(nn.Module):
         feature_queue = feature_queue.transpose(1, 2)
 
         # Speed branch
-        speed_branch = self.acc_branch1(feature_queue)  # batch, 256, 1
-        speed_branch = speed_branch.transpose(1, 2)  # batch, 1, 256
-        speed_branch = self.acc_branch2(speed_branch)  # batch, 1, 128
+        acc_branch = self.acc_branch1(feature_queue)  # batch, 256, 1
+        acc_branch = acc_branch.transpose(1, 2)  # batch, 1, 256
+        acc_branch = self.acc_branch2(acc_branch)  # batch, 1, 128
 
         # Steering branch
         steering_branch = self.steering_branch1(feature_queue)
@@ -460,17 +460,17 @@ class CNN_Transformer(nn.Module):
         steering_branch = self.steering_branch2(steering_branch)
 
         # Combine branches
-        combined_branch = torch.cat((speed_branch, steering_branch), dim=2)
+        combined_branch = torch.cat((acc_branch, steering_branch), dim=2)
         combined_branch = self.combined_branch(combined_branch)
 
         # Speed output
-        speed_output = self.speed_outputlayer(combined_branch)
+        acc_output = self.acc_outputlayer(combined_branch)
 
         # Steering output
         steering_output = self.steering_outputlayer(combined_branch)
 
         return (
-            speed_output,
+            acc_output,
             steering_output,
             new_feature,
         )  # batch, 1, 1; batch, 1, 1; batch, 128, 256
