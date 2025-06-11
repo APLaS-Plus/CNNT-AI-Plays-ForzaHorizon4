@@ -9,6 +9,7 @@ import math
 from PIL import Image
 import threading
 from collections import defaultdict
+import traceback
 
 ROOT_DIR = pathlib.Path(__file__).resolve().parent
 
@@ -18,7 +19,7 @@ UTILS_DIR = str(UTILS_DIR.resolve())
 sys.path.append(UTILS_DIR)
 from utils.capture_guideline import CaptureGuideline
 from utils.controller_output import ControllerOutput
-from utils.model.simpleCNNbaseline import SimpleCNNBaseline
+from utils.model.simpleCNNbaseline import CNN_Transformer
 from utils.model.lite_digit_detector import LiteDigitDetector
 
 
@@ -77,7 +78,7 @@ def sanitize_output(value):
 
 class AIDriverSimpleCNN:
     """
-    AI driver for Forza Horizon 4 using SimpleCNN model for control prediction
+    AI driver for Forza Horizon 4 using CNN_Transformer model for control prediction
     and virtual controller for game input.
     """
 
@@ -92,10 +93,20 @@ class AIDriverSimpleCNN:
         self.digit_detector = LiteDigitDetector(input_height=48, input_width=96)
         self.load_digit_detector()
 
-        # Initialize SimpleCNN model with 960*640 input size
+        # Initialize CNN_Transformer model with 960*640 input size
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-        self.model = SimpleCNNBaseline(input_w=960, input_h=640)
-        self.load_simplecnn_model()
+        self.model = CNN_Transformer(
+            input_len=2,
+            seq_len=40,
+            embed_dim=256,
+            num_heads=8,
+            num_layers=2,
+            batch_size=1,  # Set to 1 for inference mode
+        )
+        self.load_cnn_transformer_model()
+
+        # Initialize feature queue for temporal modeling
+        self.feature_queue = None
 
         # Control flags
         self.running = False
@@ -119,46 +130,30 @@ class AIDriverSimpleCNN:
             print("Using randomly initialized digit detector model")
         self.digit_detector.eval()
 
-    def load_simplecnn_model(self):
-        """Load the SimpleCNN model"""
-        model_path = ROOT_DIR / "model" / "SimpleCNN" / "best_cnn_model.pth"
+    def load_cnn_transformer_model(self):
+        """Load the CNN_Transformer model"""
+        model_path = (
+            ROOT_DIR / "model" / "sequential_cnn" / "best_sequential_cnn_model.pth"
+        )
         try:
             self.model.load_state_dict(
                 torch.load(str(model_path), map_location=self.device)
             )
-            print("Successfully loaded SimpleCNN model weights")
+            print("Successfully loaded CNN_Transformer model weights")
         except Exception as e:
-            print(f"Error loading SimpleCNN model: {e}")
-            print("Using randomly initialized SimpleCNN model")
+            print(f"Error loading CNN_Transformer model: {e}")
+            print("Using randomly initialized CNN_Transformer model")
         self.model.to(self.device)
         self.model.eval()
 
     def detect_speed(self, digit_region):
         """Detect speed from digit region using the digit detector"""
         if digit_region is None:
-            return torch.tensor([[0.0]], device=self.device)
+            return torch.tensor([0.0], device=self.device)
 
         # Convert to grayscale
         img = cv2.cvtColor(digit_region, cv2.COLOR_BGR2GRAY)
         pil_img = Image.fromarray(img, mode="L")
-        # # Apply median filter to remove noise
-        # median = cv2.medianBlur(img, 3)
-
-        # # Apply CLAHE (Contrast Limited Adaptive Histogram Equalization)
-        # clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        # enhanced = clahe.apply(median)
-
-        # # Apply adaptive thresholding
-        # binary = cv2.adaptiveThreshold(
-        #     enhanced, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY, 15, 5
-        # )
-
-        # # Morphological operations to enhance character contours
-        # kernel = np.ones((2, 2), np.uint8)
-        # morph = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
-
-        # # Convert processed image to PIL format
-        # pil_img = Image.fromarray(morph, mode="L")
 
         # Predict digits
         with torch.no_grad():
@@ -168,7 +163,7 @@ class AIDriverSimpleCNN:
         speed_value = digits[0] * 100 + digits[1] * 10 + digits[2]
         # Normalize speed to [0, 1] range (assuming max speed around 400)
         normalized_speed = min(speed_value / 400.0, 1.0)
-        return torch.tensor([[float(normalized_speed)]], device=self.device)
+        return torch.tensor([float(normalized_speed)], device=self.device)
 
     def process_frame(self):
         """Process a single frame: capture, detect speed, predict controls"""
@@ -181,7 +176,7 @@ class AIDriverSimpleCNN:
             with self.timer.measure("速度检测"):
                 speed = self.detect_speed(digit_region)
 
-            # Convert guideline image for model input - 保持240x144分辨率
+            # Convert guideline image for model input - 保持960x640分辨率
             with self.timer.measure("图像预处理"):
                 guideline_tensor = Image.fromarray(adjusted_frame).convert("RGB")
                 transform = transforms.Compose(
@@ -193,15 +188,17 @@ class AIDriverSimpleCNN:
                 guideline_tensor = transform(guideline_tensor).unsqueeze(0)
                 guideline_tensor = guideline_tensor.to(self.device)
 
-            # Model inference
+            # Model inference with temporal modeling
             with self.timer.measure("模型推理"):
                 with torch.no_grad():
-                    outputs = self.model(guideline_tensor, speed)
-                    steering = outputs[0, 0]  # First output: steering
-                    acceleration = outputs[0, 1]  # Second output: acceleration
+                    acceleration_output, steering_output, self.feature_queue = (
+                        self.model(guideline_tensor, speed, self.feature_queue)
+                    )
+                    steering = steering_output.squeeze().item()  # Extract scalar value
+                    acceleration = (
+                        acceleration_output.squeeze().item()
+                    )  # Extract scalar value
                     print("predict successfully")
-
-            steering, acceleration = steering.item(), acceleration.item()
 
         return steering, acceleration
 
@@ -230,7 +227,9 @@ class AIDriverSimpleCNN:
         print("AI driver started. Press Ctrl+C to stop.")
 
         frame_count = 0
-        warmup_frames = 5  # Reduced warmup frames for SimpleCNN
+        warmup_frames = (
+            10  # Increased warmup frames for CNN_Transformer temporal modeling
+        )
 
         try:
             while self.running:
@@ -255,14 +254,16 @@ class AIDriverSimpleCNN:
                         f"Frame {frame_count}: Speed: {speed_value:.1f}, "
                         f"Steering: {steering:.3f}, Acceleration: {acceleration:.3f}"
                     )
+                else:
+                    print(f"Warmup frame {frame_count + 1}/{warmup_frames}")
 
                 # Calculate processing time
                 process_time = time.time() - start_time
                 self.frame_times.append(process_time)
 
                 # Sleep to maintain target frame rate (20fps = 0.05s per frame)
-                if process_time < 0.02:
-                    time.sleep(0.02 - process_time)
+                if process_time < 0.05:
+                    time.sleep(0.05 - process_time)
 
                 # 每100帧打印一次耗时统计
                 if frame_count > 0 and frame_count % 100 == 0:
@@ -274,6 +275,7 @@ class AIDriverSimpleCNN:
             print("Keyboard interrupt received, stopping driver")
         except Exception as e:
             print(f"Error in drive loop: {e}")
+            traceback.print_exc()
         finally:
             # 打印最终的耗时统计
             self.print_time_stats()
@@ -294,7 +296,7 @@ class AIDriverSimpleCNN:
         """打印各模块耗时统计"""
         stats, total_time = self.timer.get_stats()
 
-        print("\n===== SimpleCNN模型性能统计 =====")
+        print("\n===== CNN_Transformer模型性能统计 =====")
         print(f"总耗时: {total_time:.4f}秒")
         print("-" * 40)
         print(f"{'模块名称':<25} {'平均耗时(ms)':<15} {'百分比':<10} {'调用次数'}")
@@ -317,7 +319,7 @@ class AIDriverSimpleCNN:
             print("AI driver is already running")
             return
 
-        print("Starting SimpleCNN AI driver...")
+        print("Starting CNN_Transformer AI driver...")
         self.running = True
         self.controller.start()
 
@@ -346,7 +348,7 @@ class AIDriverSimpleCNN:
 
 def main():
     """Main function to start the AI driver"""
-    print("Initializing SimpleCNN AI driver for Forza Horizon 4...")
+    print("Initializing CNN_Transformer AI driver for Forza Horizon 4...")
     driver = AIDriverSimpleCNN()
 
     print("Wait 5 seconds to focus on the game window...")

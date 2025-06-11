@@ -1,5 +1,5 @@
 numpy<2.0.0
-tqdm
+rich
 matplotlib
 opencv-python
 pillow

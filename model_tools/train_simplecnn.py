@@ -5,13 +5,32 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 from PIL import Image
 import numpy as np
 import matplotlib.pyplot as plt
 import glob
-from tqdm import tqdm
+import yaml
+from datetime import datetime
+import platform
+
+# 替换tqdm为rich
+from rich.progress import (
+    Progress,
+    TaskID,
+    TextColumn,
+    BarColumn,
+    TimeRemainingColumn,
+    TimeElapsedColumn,
+)
+from rich.console import Console
+from rich.table import Table
+from rich.panel import Panel
+from rich.text import Text
+from rich.layout import Layout
+from rich.live import Live
 
 ROOT_DIR = pathlib.Path(__file__).parent.resolve()
 UTILS_DIR = ROOT_DIR / ".."
@@ -92,7 +111,7 @@ def pearson_correlation_loss(y_pred, y_true):
     # 计算协方差和方差
     cov = torch.mean((y_pred - mean_pred) * (y_true - mean_true))
     var_pred = torch.mean((y_pred - mean_pred) ** 2)
-    var_true = torch.mean((y_true - mean_true) ** 2)
+    var_true = torch.mean((y_true - mean_pred) ** 2)
 
     # 检查方差是否为零
     if var_pred < 1e-8 or var_true < 1e-8:
@@ -105,25 +124,49 @@ def pearson_correlation_loss(y_pred, y_true):
     correlation = torch.clamp(correlation, -0.99, 0.99)
     if torch.isnan(correlation) or torch.isinf(correlation):
         return torch.tensor(0.0, device=y_pred.device)
-    
-    # 作为损失函数：1 - |r|，使相关性越强损失越小
-    loss = 1 - torch.abs(correlation)
+
+    # 作为损失函数：1 - r，使相关性越强损失越小
+    loss = 1 - correlation
 
     return loss
 
 
+class DerivativeLoss(nn.Module):
+    """
+    L = MSE(y, ŷ) + λ * MSE(Δy, Δŷ)
+    其中 Δ 在时间维度上做差分：Δy_t = y_t - y_{t-1}
+    """
+
+    def __init__(
+        self,
+    ):
+        super().__init__()
+        self.mse = nn.MSELoss()
+
+    def forward(self, y_pred: torch.Tensor, y_true: torch.Tensor):
+        """
+        y_pred, y_true: [B, T]
+        """
+        # 差分 MSE（趋势）
+        dy_pred = torch.diff(y_pred, dim=1)
+        dy_true = torch.diff(y_true, dim=1)
+        loss_trend = self.mse(dy_pred, dy_true)
+
+        return loss_trend
+
+
 class SequentialAccelerationSteeringLoss(nn.Module):
-    def __init__(self, corr_weight=1.0, indep_weight=1.0, pearson_weight=1.0):
+    def __init__(self, Derivative_derta=0.2, pearson_weight=0.5):
         super(SequentialAccelerationSteeringLoss, self).__init__()
-        if corr_weight < 0 or indep_weight < 0 or pearson_weight < 0:
+        if Derivative_derta < 0 or pearson_weight < 0:
             raise ValueError(
                 "Weights must be non-negative. Received: "
-                f"corr_weight={corr_weight}, indep_weight={indep_weight}, pearson_weight={pearson_weight}"
+                f"Derivative_derta={Derivative_derta}, pearson_weight={pearson_weight}"
             )
-            
+
         self.mse = nn.MSELoss()
-        self.corr_weight = corr_weight
-        self.indep_weight = indep_weight
+        self.Derivative_derta = Derivative_derta
+        self.derivativeLoss = DerivativeLoss()
         self.pearson_weight = pearson_weight
 
     def forward(self, pred_steering, pred_accel, target_steering, target_accel):
@@ -144,27 +187,34 @@ class SequentialAccelerationSteeringLoss(nn.Module):
         steer_loss = self.mse(pred_steering, target_steering)
         accel_loss = self.mse(pred_accel, target_accel)
 
-        # Correlation loss - 计算预测值之间的相关性
-        corr_loss = correlation_loss(pred_steering, pred_accel)
-
-        # Independence loss - 计算预测值之间的独立性
-        indep_loss = independence_loss(pred_steering, pred_accel)
-
-        # Pearson correlation loss - 计算预测值与目标值之间的相关性
-        steer_pearson_loss = pearson_correlation_loss(
+        # Derivative loss for acceleration
+        steer_derivative_loss = self.Derivative_derta * self.derivativeLoss(
             pred_steering, target_steering
         )
-        accel_pearson_loss = pearson_correlation_loss(pred_accel, target_accel)
-
-        total_loss = (
-            steer_loss
-            + accel_loss
-            + self.corr_weight * corr_loss
-            + self.indep_weight * indep_loss
-            + self.pearson_weight * (steer_pearson_loss + accel_pearson_loss)
+        accel_derivative_loss = self.Derivative_derta * self.derivativeLoss(
+            pred_accel, target_accel
         )
+        derivative_loss = steer_derivative_loss + accel_derivative_loss
 
-        return total_loss, steer_loss, accel_loss
+        # Pearson correlation loss - 计算预测值与目标值之间的相关性
+        steer_pearson_loss = self.pearson_weight * pearson_correlation_loss(
+            pred_steering, target_steering
+        )
+        accel_pearson_loss = self.pearson_weight * pearson_correlation_loss(
+            pred_accel, target_accel
+        )
+        pearson_loss = steer_pearson_loss + accel_pearson_loss
+        total_loss = steer_loss + accel_loss + derivative_loss + pearson_loss
+
+        return (
+            total_loss,
+            steer_loss,
+            accel_loss,
+            steer_derivative_loss,
+            accel_derivative_loss,
+            steer_pearson_loss,
+            accel_pearson_loss,
+        )
 
 
 class SequentialCNNDataset(Dataset):
@@ -174,7 +224,9 @@ class SequentialCNNDataset(Dataset):
     Each batch contains sequential frames, and we predict the last frame's steering and acceleration
     """
 
-    def __init__(self, root_dirs, batch_size=64, transform=None, split="train", frame_skip=1):
+    def __init__(
+        self, root_dirs, batch_size=64, transform=None, split="train", frame_skip=1
+    ):
         """
         Args:
             root_dirs (list): List of dataset root directories (data_1, data_2, etc.)
@@ -185,7 +237,9 @@ class SequentialCNNDataset(Dataset):
         """
         self.transform = transform
         self.batch_size = batch_size
-        self.frame_skip = frame_skip + 1  # +1 because we want to take every (frame_skip+1)th frame
+        self.frame_skip = (
+            frame_skip + 1
+        )  # +1 because we want to take every (frame_skip+1)th frame
 
         # Collect all image files from all data directories
         self.all_sequences = []
@@ -207,8 +261,8 @@ class SequentialCNNDataset(Dataset):
             )
 
             # Apply frame skipping to reduce from 20fps to 10fps
-            img_files = img_files[::self.frame_skip]
-            
+            img_files = img_files[:: self.frame_skip]
+
             # Create sequences of batch_size length
             img_paths = [os.path.join(data_dir, f) for f in img_files]
 
@@ -256,7 +310,9 @@ class SequentialCNNDataset(Dataset):
         images = torch.stack(images)  # [batch_size, 3, H, W]
         speeds = torch.tensor(speeds, dtype=torch.float32)  # [batch_size]
         target_steering = torch.tensor(target_steering, dtype=torch.float32)  # 标量
-        target_acceleration = torch.tensor(target_acceleration, dtype=torch.float32)  # 标量
+        target_acceleration = torch.tensor(
+            target_acceleration, dtype=torch.float32
+        )  # 标量
 
         return images, speeds, target_steering, target_acceleration
 
@@ -303,6 +359,7 @@ def train(
     """
     Train the Sequential CNN model with time-series data
     """
+    console = Console()
     model = model.to(device)
     best_val_loss = float("inf")
     history = {
@@ -312,98 +369,59 @@ def train(
         "train_accel_loss": [],
         "val_steering_loss": [],
         "val_accel_loss": [],
+        "train_derivative_loss": [],
+        "train_pearson_loss": [],
+        "val_derivative_loss": [],
+        "val_pearson_loss": [],
     }
 
     # Early stopping parameters
     patience = 5
     counter = 0
 
-    for epoch in range(num_epochs):
-        # Training phase
-        model.train()
-        train_loss = 0.0
-        train_steering_loss = 0.0
-        train_accel_loss = 0.0
+    # 创建rich进度显示
+    with Progress(
+        TextColumn("[bold blue]{task.description}"),
+        BarColumn(bar_width=None),
+        "[progress.percentage]{task.percentage:>3.1f}%",
+        "•",
+        TimeElapsedColumn(),
+        "•",
+        TimeRemainingColumn(),
+        console=console,
+        expand=True,
+    ) as progress:
 
-        progress_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs} [Train]")
-        for batch_images, batch_speeds, steering_labels, accel_labels in progress_bar:
-            batch_images = batch_images.to(
-                device
-            )  # [num_sequences, batch_size, 3, H, W]
-            batch_speeds = batch_speeds.to(device)  # [num_sequences, batch_size]
-            steering_labels = steering_labels.to(device)  # [num_sequences]
-            accel_labels = accel_labels.to(device)  # [num_sequences]
+        epoch_task = progress.add_task("[green]Training Progress", total=num_epochs)
 
-            optimizer.zero_grad()
+        for epoch in range(num_epochs):
+            # Training phase
+            model.train()
+            train_loss = 0.0
+            train_steering_loss = 0.0
+            train_accel_loss = 0.0
+            train_steer_derivative_loss = 0.0
+            train_accel_derivative_loss = 0.0
+            train_steer_pearson_loss = 0.0
+            train_accel_pearson_loss = 0.0
 
-            sequence_steering_preds = []
-            sequence_accel_preds = []
-
-            # Process each sequence in the batch
-            for seq_idx in range(batch_images.shape[0]):
-                images_seq = batch_images[seq_idx]  # [batch_size, 3, H, W]
-                speeds_seq = batch_speeds[seq_idx]  # [batch_size]
-
-                # Forward pass through the sequence
-                feature_queue = None
-                for frame_idx in range(batch_size):
-                    img = images_seq[frame_idx : frame_idx + 1]  # [1, 3, H, W]
-                    speed = speeds_seq[frame_idx : frame_idx + 1]  # [1]
-
-                    acc_output, steering_output, feature_queue = model(
-                        img, speed, feature_queue
-                    )
-
-                # Only use the prediction from the last frame
-                sequence_steering_preds.append(steering_output.squeeze())  # 标量
-                sequence_accel_preds.append(acc_output.squeeze())  # 标量
-
-            # Stack predictions
-            pred_steering = torch.stack(sequence_steering_preds)  # [num_sequences]
-            pred_accel = torch.stack(sequence_accel_preds)  # [num_sequences]
-
-            # Calculate loss using custom sequential loss function
-            total_loss, steer_loss, accel_loss = criterion(
-                pred_steering, pred_accel, steering_labels, accel_labels
+            # 创建训练进度条
+            train_task = progress.add_task(
+                f"[cyan]Epoch {epoch+1}/{num_epochs} [Train]", total=len(train_loader)
             )
 
-            # Backward pass
-            total_loss.backward()
-            optimizer.step()
-
-            # Accumulate losses
-            train_loss += total_loss.item()
-            train_steering_loss += steer_loss.item()
-            train_accel_loss += accel_loss.item()
-
-            # Update progress bar
-            progress_bar.set_postfix(
-                {
-                    "loss": f"{total_loss.item():.4f}",
-                    "steer": f"{steer_loss.item():.4f}",
-                    "accel": f"{accel_loss.item():.4f}",
-                }
-            )
-
-        # Calculate average training loss
-        train_loss /= len(train_loader)
-        train_steering_loss /= len(train_loader)
-        train_accel_loss /= len(train_loader)
-
-        # Validation phase
-        model.eval()
-        val_loss = 0.0
-        val_steering_loss = 0.0
-        val_accel_loss = 0.0
-
-        progress_bar = tqdm(val_loader, desc=f"Epoch {epoch+1}/{num_epochs} [Val]")
-
-        with torch.no_grad():
-            for batch_images, batch_speeds, steering_labels, accel_labels in progress_bar:
+            for batch_idx, (
+                batch_images,
+                batch_speeds,
+                steering_labels,
+                accel_labels,
+            ) in enumerate(train_loader):
                 batch_images = batch_images.to(device)
                 batch_speeds = batch_speeds.to(device)
                 steering_labels = steering_labels.to(device)
                 accel_labels = accel_labels.to(device)
+
+                optimizer.zero_grad()
 
                 sequence_steering_preds = []
                 sequence_accel_preds = []
@@ -432,105 +450,504 @@ def train(
                 pred_accel = torch.stack(sequence_accel_preds)
 
                 # Calculate loss using custom sequential loss function
-                total_loss, steer_loss, accel_loss = criterion(
-                    pred_steering, pred_accel, steering_labels, accel_labels
+                (
+                    total_loss,
+                    steer_loss,
+                    accel_loss,
+                    steer_derivative_loss,
+                    accel_derivative_loss,
+                    steer_pearson_loss,
+                    accel_pearson_loss,
+                ) = criterion(
+                    pred_steering,
+                    pred_accel,
+                    steering_labels,
+                    accel_labels,
                 )
 
-                val_loss += total_loss.item()
-                val_steering_loss += steer_loss.item()
-                val_accel_loss += accel_loss.item()
+                # Backward pass
+                total_loss.backward()
+                nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
 
-                # Update progress bar
-                progress_bar.set_postfix(
-                    {
-                        "val_loss": f"{total_loss.item():.4f}",
-                        "val_steer": f"{steer_loss.item():.4f}",
-                        "val_accel": f"{accel_loss.item():.4f}",
-                    }
+                # Accumulate losses
+                train_loss += total_loss.item()
+                train_steering_loss += steer_loss.item()
+                train_accel_loss += accel_loss.item()
+                train_steer_derivative_loss += steer_derivative_loss.item()
+                train_accel_derivative_loss += accel_derivative_loss.item()
+                train_steer_pearson_loss += steer_pearson_loss.item()
+                train_accel_pearson_loss += accel_pearson_loss.item()
+
+                # 更新进度条并显示详细信息
+                progress.update(
+                    train_task,
+                    advance=1,
+                    description=f"[cyan]Epoch {epoch+1} [Train] - "
+                    f"Loss: {total_loss.item():.4f} | "
+                    f"Steer: {steer_loss.item():.4f} | "
+                    f"Accel: {accel_loss.item():.4f} | "
+                    f"Deriv: {(steer_derivative_loss.item() + accel_derivative_loss.item()):.4f} | "
+                    f"Pearson: {(steer_pearson_loss.item() + accel_pearson_loss.item()):.4f}",
                 )
 
-        # Calculate average validation loss
-        val_loss /= len(val_loader)
-        val_steering_loss /= len(val_loader)
-        val_accel_loss /= len(val_loader)
+            # 移除训练进度条
+            progress.remove_task(train_task)
 
-        # Learning rate scheduler step
-        if scheduler:
-            scheduler.step(val_loss)
+            # Calculate average training loss
+            train_loss /= len(train_loader)
+            train_steering_loss /= len(train_loader)
+            train_accel_loss /= len(train_loader)
+            train_steer_derivative_loss /= len(train_loader)
+            train_accel_derivative_loss /= len(train_loader)
+            train_steer_pearson_loss /= len(train_loader)
+            train_accel_pearson_loss /= len(train_loader)
 
-        # Save best model
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            torch.save(
-                model.state_dict(),
-                str(model_save_path / "best_sequential_cnn_model.pth"),
+            # Validation phase
+            model.eval()
+            val_loss = 0.0
+            val_steering_loss = 0.0
+            val_accel_loss = 0.0
+            val_steer_derivative_loss = 0.0
+            val_accel_derivative_loss = 0.0
+            val_steer_pearson_loss = 0.0
+            val_accel_pearson_loss = 0.0
+
+            # 创建验证进度条
+            val_task = progress.add_task(
+                f"[magenta]Epoch {epoch+1}/{num_epochs} [Val]", total=len(val_loader)
             )
-            print(f"Model saved with validation loss: {val_loss:.4f}")
-            counter = 0
-        else:
-            counter += 1
-            print(f"EarlyStopping counter: {counter} out of {patience}")
-            if counter >= patience:
-                print(
-                    f"Early stopping: Validation loss didn't improve for {patience} epochs"
+
+            with torch.no_grad():
+                for batch_idx, (
+                    batch_images,
+                    batch_speeds,
+                    steering_labels,
+                    accel_labels,
+                ) in enumerate(val_loader):
+                    batch_images = batch_images.to(device)
+                    batch_speeds = batch_speeds.to(device)
+                    steering_labels = steering_labels.to(device)
+                    accel_labels = accel_labels.to(device)
+
+                    sequence_steering_preds = []
+                    sequence_accel_preds = []
+
+                    # Process each sequence in the batch
+                    for seq_idx in range(batch_images.shape[0]):
+                        images_seq = batch_images[seq_idx]
+                        speeds_seq = batch_speeds[seq_idx]
+
+                        # Forward pass through the sequence
+                        feature_queue = None
+                        for frame_idx in range(batch_size):
+                            img = images_seq[frame_idx : frame_idx + 1]
+                            speed = speeds_seq[frame_idx : frame_idx + 1]
+
+                            acc_output, steering_output, feature_queue = model(
+                                img, speed, feature_queue
+                            )
+
+                        # Only use the prediction from the last frame
+                        sequence_steering_preds.append(steering_output.squeeze())
+                        sequence_accel_preds.append(acc_output.squeeze())
+
+                    # Stack predictions
+                    pred_steering = torch.stack(sequence_steering_preds)
+                    pred_accel = torch.stack(sequence_accel_preds)
+
+                    # Calculate loss using custom sequential loss function
+                    (
+                        total_loss,
+                        steer_loss,
+                        accel_loss,
+                        steer_derivative_loss,
+                        accel_derivative_loss,
+                        steer_pearson_loss,
+                        accel_pearson_loss,
+                    ) = criterion(
+                        pred_steering,
+                        pred_accel,
+                        steering_labels,
+                        accel_labels,
+                    )
+
+                    val_loss += total_loss.item()
+                    val_steering_loss += steer_loss.item()
+                    val_accel_loss += accel_loss.item()
+                    val_steer_derivative_loss += steer_derivative_loss.item()
+                    val_accel_derivative_loss += accel_derivative_loss.item()
+                    val_steer_pearson_loss += steer_pearson_loss.item()
+                    val_accel_pearson_loss += accel_pearson_loss.item()
+
+                    # 更新验证进度条
+                    progress.update(
+                        val_task,
+                        advance=1,
+                        description=f"[magenta]Epoch {epoch+1} [Val] - "
+                        f"Loss: {total_loss.item():.4f} | "
+                        f"Steer: {steer_loss.item():.4f} | "
+                        f"Accel: {accel_loss.item():.4f} | "
+                        f"Deriv: {(steer_derivative_loss.item() + accel_derivative_loss.item()):.4f} | "
+                        f"Pearson: {(steer_pearson_loss.item() + accel_pearson_loss.item()):.4f}",
+                    )
+
+            # 移除验证进度条
+            progress.remove_task(val_task)
+
+            # Calculate average validation loss
+            val_loss /= len(val_loader)
+            val_steering_loss /= len(val_loader)
+            val_accel_loss /= len(val_loader)
+            val_steer_derivative_loss /= len(val_loader)
+            val_accel_derivative_loss /= len(val_loader)
+            val_steer_pearson_loss /= len(val_loader)
+            val_accel_pearson_loss /= len(val_loader)
+
+            # Learning rate scheduler step
+            if scheduler:
+                scheduler.step(val_loss)
+
+            # 创建详细的损失表格
+            table = Table(title=f"Epoch {epoch+1} Results")
+            table.add_column("Metric", style="cyan", no_wrap=True)
+            table.add_column("Train", style="green")
+            table.add_column("Val", style="magenta")
+            table.add_column("Improvement", style="yellow")
+
+            # 计算改进
+            prev_val_loss = (
+                history["val_loss"][-1] if history["val_loss"] else float("inf")
+            )
+            improvement = "↓" if val_loss < prev_val_loss else "↑"
+
+            table.add_row(
+                "Total Loss", f"{train_loss:.4f}", f"{val_loss:.4f}", improvement
+            )
+            table.add_row(
+                "Steering Loss",
+                f"{train_steering_loss:.4f}",
+                f"{val_steering_loss:.4f}",
+                "",
+            )
+            table.add_row(
+                "Accel Loss", f"{train_accel_loss:.4f}", f"{val_accel_loss:.4f}", ""
+            )
+            table.add_row(
+                "Steer Derivative",
+                f"{train_steer_derivative_loss:.4f}",
+                f"{val_steer_derivative_loss:.4f}",
+                "",
+            )
+            table.add_row(
+                "Accel Derivative",
+                f"{train_accel_derivative_loss:.4f}",
+                f"{val_accel_derivative_loss:.4f}",
+                "",
+            )
+            table.add_row(
+                "Steer Pearson",
+                f"{train_steer_pearson_loss:.4f}",
+                f"{val_steer_pearson_loss:.4f}",
+                "",
+            )
+            table.add_row(
+                "Accel Pearson",
+                f"{train_accel_pearson_loss:.4f}",
+                f"{val_accel_pearson_loss:.4f}",
+                "",
+            )
+
+            console.print(table)
+
+            # Save best model
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                torch.save(
+                    model.state_dict(),
+                    str(model_save_path / "best_sequential_cnn_model.pth"),
                 )
-                break
+                console.print(
+                    f"[bold green]✅ Model saved with validation loss: {val_loss:.4f}[/bold green]"
+                )
+                counter = 0
+            else:
+                counter += 1
+                console.print(
+                    f"[yellow]⚠️  EarlyStopping counter: {counter} out of {patience}[/yellow]"
+                )
+                if counter >= patience:
+                    console.print(
+                        f"[bold red]🛑 Early stopping: Validation loss didn't improve for {patience} epochs[/bold red]"
+                    )
+                    break
 
-        # Record history
-        history["train_loss"].append(train_loss)
-        history["val_loss"].append(val_loss)
-        history["train_steering_loss"].append(train_steering_loss)
-        history["train_accel_loss"].append(train_accel_loss)
-        history["val_steering_loss"].append(val_steering_loss)
-        history["val_accel_loss"].append(val_accel_loss)
+            # Record history with more detailed metrics
+            history["train_loss"].append(train_loss)
+            history["val_loss"].append(val_loss)
+            history["train_steering_loss"].append(train_steering_loss)
+            history["train_accel_loss"].append(train_accel_loss)
+            history["val_steering_loss"].append(val_steering_loss)
+            history["val_accel_loss"].append(val_accel_loss)
+            history["train_derivative_loss"].append(
+                train_steer_derivative_loss + train_accel_derivative_loss
+            )
+            history["train_pearson_loss"].append(
+                train_steer_pearson_loss + train_accel_pearson_loss
+            )
+            history["val_derivative_loss"].append(
+                val_steer_derivative_loss + val_accel_derivative_loss
+            )
+            history["val_pearson_loss"].append(
+                val_steer_pearson_loss + val_accel_pearson_loss
+            )
 
-        print(
-            f"Epoch {epoch+1}/{num_epochs}, "
-            f"Train Loss: {train_loss:.4f} (Steer: {train_steering_loss:.4f}, Accel: {train_accel_loss:.4f}), "
-            f"Val Loss: {val_loss:.4f} (Steer: {val_steering_loss:.4f}, Accel: {val_accel_loss:.4f})"
-        )
+            # 更新总体epoch进度
+            progress.update(epoch_task, advance=1)
 
-        # Clear cache at the end of each epoch
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+            # Clear cache at the end of each epoch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
     return history
 
 
 def plot_training_history(history, model_save_path=None):
-    """Plot training history"""
-    plt.figure(figsize=(15, 10))
+    """Plot training history with more detailed metrics"""
+    plt.figure(figsize=(20, 15))
 
     # Plot overall loss
-    plt.subplot(2, 2, 1)
-    plt.plot(history["train_loss"], label="Train Loss")
-    plt.plot(history["val_loss"], label="Val Loss")
+    plt.subplot(3, 3, 1)
+    plt.plot(history["train_loss"], label="Train Loss", color="blue")
+    plt.plot(history["val_loss"], label="Val Loss", color="red")
     plt.xlabel("Epoch")
     plt.ylabel("Total Loss")
     plt.legend()
     plt.title("Training and Validation Loss")
+    plt.grid(True, alpha=0.3)
 
     # Plot steering loss
-    plt.subplot(2, 2, 2)
-    plt.plot(history["train_steering_loss"], label="Train Steering Loss")
-    plt.plot(history["val_steering_loss"], label="Val Steering Loss")
+    plt.subplot(3, 3, 2)
+    plt.plot(history["train_steering_loss"], label="Train Steering Loss", color="green")
+    plt.plot(history["val_steering_loss"], label="Val Steering Loss", color="orange")
     plt.xlabel("Epoch")
     plt.ylabel("Steering Loss")
     plt.legend()
     plt.title("Steering Loss")
+    plt.grid(True, alpha=0.3)
 
     # Plot acceleration loss
-    plt.subplot(2, 2, 3)
-    plt.plot(history["train_accel_loss"], label="Train Accel Loss")
-    plt.plot(history["val_accel_loss"], label="Val Accel Loss")
+    plt.subplot(3, 3, 3)
+    plt.plot(history["train_accel_loss"], label="Train Accel Loss", color="purple")
+    plt.plot(history["val_accel_loss"], label="Val Accel Loss", color="brown")
     plt.xlabel("Epoch")
     plt.ylabel("Acceleration Loss")
     plt.legend()
     plt.title("Acceleration Loss")
+    plt.grid(True, alpha=0.3)
+
+    # Plot derivative loss
+    plt.subplot(3, 3, 4)
+    plt.plot(
+        history["train_derivative_loss"], label="Train Derivative Loss", color="cyan"
+    )
+    plt.plot(
+        history["val_derivative_loss"], label="Val Derivative Loss", color="magenta"
+    )
+    plt.xlabel("Epoch")
+    plt.ylabel("Derivative Loss")
+    plt.legend()
+    plt.title("Derivative Loss")
+    plt.grid(True, alpha=0.3)
+
+    # Plot Pearson loss
+    plt.subplot(3, 3, 5)
+    plt.plot(history["train_pearson_loss"], label="Train Pearson Loss", color="olive")
+    plt.plot(history["val_pearson_loss"], label="Val Pearson Loss", color="navy")
+    plt.xlabel("Epoch")
+    plt.ylabel("Pearson Loss")
+    plt.legend()
+    plt.title("Pearson Correlation Loss")
+    plt.grid(True, alpha=0.3)
+
+    # Loss comparison bar chart for final epoch
+    plt.subplot(3, 3, 6)
+    final_losses = [
+        history["train_loss"][-1],
+        history["val_loss"][-1],
+        history["train_steering_loss"][-1],
+        history["val_steering_loss"][-1],
+        history["train_accel_loss"][-1],
+        history["val_accel_loss"][-1],
+    ]
+    loss_labels = [
+        "Train Total",
+        "Val Total",
+        "Train Steer",
+        "Val Steer",
+        "Train Accel",
+        "Val Accel",
+    ]
+    plt.bar(
+        loss_labels,
+        final_losses,
+        color=["blue", "red", "green", "orange", "purple", "brown"],
+    )
+    plt.ylabel("Loss Value")
+    plt.title("Final Epoch Loss Comparison")
+    plt.xticks(rotation=45)
+    plt.grid(True, alpha=0.3)
+
+    # Training vs Validation loss ratio
+    plt.subplot(3, 3, 7)
+    train_val_ratio = [
+        t / v if v > 0 else 1
+        for t, v in zip(history["train_loss"], history["val_loss"])
+    ]
+    plt.plot(train_val_ratio, label="Train/Val Ratio", color="darkred")
+    plt.axhline(y=1, color="black", linestyle="--", alpha=0.5, label="Perfect Ratio")
+    plt.xlabel("Epoch")
+    plt.ylabel("Train/Val Loss Ratio")
+    plt.legend()
+    plt.title("Train/Validation Loss Ratio")
+    plt.grid(True, alpha=0.3)
+
+    # Loss components stacked area chart
+    plt.subplot(3, 3, 8)
+    epochs = range(len(history["train_loss"]))
+    plt.stackplot(
+        epochs,
+        history["train_steering_loss"],
+        history["train_accel_loss"],
+        history["train_derivative_loss"],
+        history["train_pearson_loss"],
+        labels=["Steering", "Acceleration", "Derivative", "Pearson"],
+        alpha=0.7,
+    )
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss Components")
+    plt.legend(loc="upper right")
+    plt.title("Training Loss Components (Stacked)")
+    plt.grid(True, alpha=0.3)
+
+    # Learning curve smoothed
+    plt.subplot(3, 3, 9)
+    # Simple moving average for smoothing
+    window = 5
+    if len(history["train_loss"]) >= window:
+        train_smooth = np.convolve(
+            history["train_loss"], np.ones(window) / window, mode="valid"
+        )
+        val_smooth = np.convolve(
+            history["val_loss"], np.ones(window) / window, mode="valid"
+        )
+        epochs_smooth = range(window - 1, len(history["train_loss"]))
+        plt.plot(
+            epochs_smooth,
+            train_smooth,
+            label="Train Loss (Smoothed)",
+            color="blue",
+            linewidth=2,
+        )
+        plt.plot(
+            epochs_smooth,
+            val_smooth,
+            label="Val Loss (Smoothed)",
+            color="red",
+            linewidth=2,
+        )
+    else:
+        plt.plot(history["train_loss"], label="Train Loss", color="blue")
+        plt.plot(history["val_loss"], label="Val Loss", color="red")
+    plt.xlabel("Epoch")
+    plt.ylabel("Smoothed Loss")
+    plt.legend()
+    plt.title("Smoothed Learning Curves")
+    plt.grid(True, alpha=0.3)
 
     plt.tight_layout()
-    plt.savefig(str(model_save_path / "cnn_training_history.png"))
+    plt.savefig(
+        str(model_save_path / "detailed_cnn_training_history.png"),
+        dpi=300,
+        bbox_inches="tight",
+    )
     plt.show()
+
+
+def save_training_config(
+    model_save_path,
+    model_config,
+    training_config,
+    optimizer_config,
+    scheduler_config,
+    dataset_config,
+    loss_config,
+    hardware_config,
+    history,
+):
+    """
+    保存训练配置到YAML文件
+    """
+    config = {
+        "training_info": {
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "python_version": platform.python_version(),
+            "pytorch_version": torch.__version__,
+            "platform": platform.platform(),
+        },
+        "model_config": model_config,
+        "training_config": training_config,
+        "optimizer_config": optimizer_config,
+        "scheduler_config": scheduler_config,
+        "dataset_config": dataset_config,
+        "loss_config": loss_config,
+        "hardware_config": hardware_config,
+        "training_results": {
+            "total_epochs": len(history["train_loss"]),
+            "best_val_loss": float(min(history["val_loss"])),
+            "final_train_loss": float(history["train_loss"][-1]),
+            "final_val_loss": float(history["val_loss"][-1]),
+            "final_train_steering_loss": float(history["train_steering_loss"][-1]),
+            "final_val_steering_loss": float(history["val_steering_loss"][-1]),
+            "final_train_accel_loss": float(history["train_accel_loss"][-1]),
+            "final_val_accel_loss": float(history["val_accel_loss"][-1]),
+            "final_train_derivative_loss": (
+                float(history["train_derivative_loss"][-1])
+                if history["train_derivative_loss"]
+                else 0.0
+            ),
+            "final_val_derivative_loss": (
+                float(history["val_derivative_loss"][-1])
+                if history["val_derivative_loss"]
+                else 0.0
+            ),
+            "final_train_pearson_loss": (
+                float(history["train_pearson_loss"][-1])
+                if history["train_pearson_loss"]
+                else 0.0
+            ),
+            "final_val_pearson_loss": (
+                float(history["val_pearson_loss"][-1])
+                if history["val_pearson_loss"]
+                else 0.0
+            ),
+        },
+    }
+
+    # 保存配置文件
+    config_path = (
+        model_save_path
+        / f"training_config_{datetime.now().strftime('%Y%m%d_%H%M%S')}.yaml"
+    )
+    with open(config_path, "w", encoding="utf-8") as f:
+        yaml.dump(config, f, default_flow_style=False, indent=2, allow_unicode=True)
+
+    console = Console()
+    console.print(
+        f"[bold green]📄 Training configuration saved to: {config_path}[/bold green]"
+    )
+
+    return config_path
 
 
 if __name__ == "__main__":
@@ -562,12 +979,28 @@ if __name__ == "__main__":
     )
 
     # Model parameters
+    frame_skip = 3  # Skip every other frame to achieve 5 fps from 20 fps
     batch_size = 40  # Sequence length
     dataloader_batch_size = 1  # Number of sequences per batch
+    num_epochs = 100  # Number of training epochs
+    steps_per_epoch = len(data_dirs) * (
+        len(os.listdir(data_dirs[0])) // (frame_skip + 1) // batch_size
+    )
+    warmup_steps = 500
+    total_steps = num_epochs * steps_per_epoch
+    
+    print(f"Using frame skip: {frame_skip} to achieve 10fps from 20fps")
+    print(f"Batch size: {batch_size}, Dataloader batch size: {dataloader_batch_size}")
+    print(f"Number of epochs: {num_epochs}, Steps per epoch: {steps_per_epoch}")
+    print(f"Total steps: {total_steps}, Warmup steps: {warmup_steps}")
 
-    # 创建数据集和数据加载器，使用frame_skip=1来实现10fps采样
+    # 创建数据集和数据加载器
     train_dataset = SequentialCNNDataset(
-        data_dirs, batch_size=batch_size, transform=transform, split="train", frame_skip=1
+        data_dirs,
+        batch_size=batch_size,
+        transform=transform,
+        split="train",
+        frame_skip=frame_skip,
     )
     val_dataset = SequentialCNNDataset(
         data_dirs, batch_size=batch_size, transform=transform, split="val", frame_skip=1
@@ -610,22 +1043,190 @@ if __name__ == "__main__":
         batch_size=1,  # Set to 1 for sequential processing
     )
 
-    # 使用自定义序列损失函数，与train_CNN_transformer.py相同的权重配置
-    criterion = SequentialAccelerationSteeringLoss(corr_weight=0.8, indep_weight=0.6, pearson_weight=2)
-    optimizer = optim.AdamW(
-        model.parameters(),
-        lr=0.00005,
-        weight_decay=1e-4,  # Slightly lower lr for sequential training
+    def setup_layered_optimizer(
+        model, cnn_lr=1e-4, transformer_lr=5e-5, weight_decay=1e-4
+    ):
+        """
+        为模型的不同部分设置不同的学习率
+        Args:
+            model: CNN_Transformer模型
+            cnn_lr: CNN部分的学习率
+            transformer_lr: Transformer部分的学习率
+            weight_decay: 权重衰减
+        Returns:
+            optimizer: 配置好的优化器
+        """
+        # 定义参数组
+        cnn_params = []
+        transformer_params = []
+
+        # 遍历模型参数，按模块分类
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                # CNN相关部分 - 特征提取器和CNN-ViT模块
+                if any(
+                    keyword in name
+                    for keyword in [
+                        "cnnvit.feature_extractor",
+                        "cnnvit.image_encoder",
+                        "cnnvit.speed_encoder",
+                        "cnnvit.downsample",
+                    ]
+                ):
+                    cnn_params.append(param)
+                    print(f"CNN部分参数: {name}")
+
+                # Transformer相关部分 - 时间序列Transformer和输出层
+                elif any(
+                    keyword in name
+                    for keyword in [
+                        "transformer_blocks",
+                        "timepositional_embedding",
+                        "timetransformer",
+                        "downsample",
+                        "acc_branch",
+                        "steering_branch",
+                        "combined_branch",
+                        "acc_outputlayer",
+                        "steering_outputlayer",
+                    ]
+                ):
+                    transformer_params.append(param)
+                    print(f"Transformer部分参数: {name}")
+
+                else:
+                    # 默认归类到CNN部分
+                    transformer_params.append(param)
+                    print(f"默认CNN部分参数: {name}")
+
+        # 创建参数组
+        param_groups = [
+            {
+                "params": cnn_params,
+                "lr": cnn_lr,
+                "weight_decay": weight_decay,
+                "name": "cnn_features",
+            },
+            {
+                "params": transformer_params,
+                "lr": transformer_lr,
+                "weight_decay": weight_decay,
+                "name": "transformer_temporal",
+            },
+        ]
+
+        return param_groups
+
+    # 使用分层优化器
+    cnn_lr = 1e-4
+    transformer_lr = 5e-5
+    weight_decay = 1e-4
+    param_groups = setup_layered_optimizer(
+        model, cnn_lr=cnn_lr, transformer_lr=transformer_lr, weight_decay=weight_decay
+    )
+    print("Parameter groups for optimizer:")
+    for group in param_groups:
+        print(
+            f"Group: {group['name']}, Learning Rate: {group['lr']}, Params: {len(group['params'])}"
+        )
+
+    # 使用自定义序列损失函数配置
+    derivative_delta = 0.7
+    pearson_weight = 0.5
+    criterion = SequentialAccelerationSteeringLoss(
+        Derivative_derta=derivative_delta, pearson_weight=pearson_weight
+    )
+    optimizer = optim.AdamW(param_groups)
+
+    # 先建两个调度器
+    warmup = LinearLR(
+        optimizer, start_factor=0.2, end_factor=1.0, total_iters=warmup_steps
+    )
+    cosine = CosineAnnealingLR(
+        optimizer, T_max=total_steps - warmup_steps, eta_min=1e-6
     )
 
     # 添加学习率调度器
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, "min", patience=5, factor=0.5
+    scheduler = SequentialLR(
+        optimizer,
+        schedulers=[warmup, cosine],
+        milestones=[warmup_steps],
     )
 
     # 检查设备
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
+
+    # 收集配置信息用于保存
+    model_config = {
+        "model_type": "CNN_Transformer",
+        "input_len": 2,
+        "seq_len": batch_size,
+        "embed_dim": 256,
+        "num_heads": 8,
+        "num_layers": 2,
+        "model_batch_size": 1,
+    }
+
+    training_config = {
+        "num_epochs": num_epochs,
+        "batch_size": batch_size,
+        "dataloader_batch_size": dataloader_batch_size,
+        "frame_skip": frame_skip,
+        "early_stopping_patience": 5,
+        "gradient_clip_max_norm": 1.0,
+        "random_seed": 42,
+    }
+
+    optimizer_config = {
+        "optimizer_type": "AdamW",
+        "cnn_learning_rate": cnn_lr,
+        "transformer_learning_rate": transformer_lr,
+        "weight_decay": weight_decay,
+        "layered_optimization": True,
+    }
+
+    scheduler_config = {
+        "scheduler_type": "SequentialLR",
+        "warmup_steps": warmup_steps,
+        "total_steps": total_steps,
+        "warmup_start_factor": 0.2,
+        "warmup_end_factor": 1.0,
+        "cosine_eta_min": 1e-6,
+    }
+
+    dataset_config = {
+        "dataset_type": "SequentialCNNDataset",
+        "data_directories": [str(d) for d in data_dirs],
+        "train_sequences": len(train_dataset),
+        "val_sequences": len(val_dataset),
+        "image_size": [640, 960],
+        "num_workers": num_workers,
+        "pin_memory": True,
+        "shuffle_train": True,
+    }
+
+    loss_config = {
+        "loss_function": "SequentialAccelerationSteeringLoss",
+        "derivative_delta": derivative_delta,
+        "pearson_weight": pearson_weight,
+        "components": [
+            "MSE_steering",
+            "MSE_acceleration",
+            "derivative_loss",
+            "pearson_correlation_loss",
+        ],
+    }
+
+    hardware_config = {
+        "device": str(device),
+        "cuda_available": torch.cuda.is_available(),
+        "gpu_name": (
+            torch.cuda.get_device_name(0) if torch.cuda.is_available() else "N/A"
+        ),
+        "cpu_count": os.cpu_count(),
+        "platform": platform.platform(),
+    }
 
     # 训练模型
     history = train(
@@ -635,7 +1236,7 @@ if __name__ == "__main__":
         criterion,
         optimizer,
         scheduler=scheduler,
-        num_epochs=100,
+        num_epochs=num_epochs,
         device=device,
         model_save_path=model_save_path,
         batch_size=batch_size,
@@ -649,3 +1250,21 @@ if __name__ == "__main__":
         model.state_dict(), str(model_save_path / "final_sequential_cnn_model.pth")
     )
     print("Training completed, final model saved")
+
+    # 保存训练配置到YAML文件
+    config_path = save_training_config(
+        model_save_path=model_save_path,
+        model_config=model_config,
+        training_config=training_config,
+        optimizer_config=optimizer_config,
+        scheduler_config=scheduler_config,
+        dataset_config=dataset_config,
+        loss_config=loss_config,
+        hardware_config=hardware_config,
+        history=history,
+    )
+
+    console = Console()
+    console.print(f"[bold blue]🎉 Training completed successfully![/bold blue]")
+    console.print(f"[green]📁 Model files saved to: {model_save_path}[/green]")
+    console.print(f"[green]📋 Configuration saved to: {config_path}[/green]")

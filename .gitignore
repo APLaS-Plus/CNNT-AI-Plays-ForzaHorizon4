@@ -1,13 +1,13 @@
-/dataset/*
-/raw_data/*
-/run/*
+dataset/*
+raw_data/*
+run/*
 test.py
 test2.py
-/model/easyocr/
-/model/CNNT/*.pth
-/model/SimpleBaseline/*.pth
-/model/CNN_transformer/*.pth
-
+model/easyocr/
+model/CNNT/*.pth
+model/SimpleBaseline/*.pth
+model/CNN_transformer/*.pth
+model/sequential_cnn/*.pth
 
 # ---> Python
 # Byte-compiled / optimized / DLL files
