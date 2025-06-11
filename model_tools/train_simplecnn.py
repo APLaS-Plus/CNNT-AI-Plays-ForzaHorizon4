@@ -151,6 +151,8 @@ class DerivativeLoss(nn.Module):
         dy_pred = torch.diff(y_pred, dim=0)
         dy_true = torch.diff(y_true, dim=0)
         loss_trend = self.mse(dy_pred, dy_true)
+        if torch.isnan(loss_trend) or torch.isinf(loss_trend):
+            return torch.tensor(0.0, device=y_pred.device)
 
         return loss_trend
 
