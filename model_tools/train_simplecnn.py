@@ -148,8 +148,8 @@ class DerivativeLoss(nn.Module):
         y_pred, y_true: [B, T]
         """
         # 差分 MSE（趋势）
-        dy_pred = torch.diff(y_pred, dim=1)
-        dy_true = torch.diff(y_true, dim=1)
+        dy_pred = torch.diff(y_pred, dim=0)
+        dy_true = torch.diff(y_true, dim=0)
         loss_trend = self.mse(dy_pred, dy_true)
 
         return loss_trend
@@ -989,7 +989,7 @@ if __name__ == "__main__":
     warmup_steps = 500
     total_steps = num_epochs * steps_per_epoch
     
-    print(f"Using frame skip: {frame_skip} to achieve 10fps from 20fps")
+    print(f"Using frame skip: {frame_skip} to achieve {20//(frame_skip + 1)}fps from 20fps")
     print(f"Batch size: {batch_size}, Dataloader batch size: {dataloader_batch_size}")
     print(f"Number of epochs: {num_epochs}, Steps per epoch: {steps_per_epoch}")
     print(f"Total steps: {total_steps}, Warmup steps: {warmup_steps}")
@@ -1003,7 +1003,7 @@ if __name__ == "__main__":
         frame_skip=frame_skip,
     )
     val_dataset = SequentialCNNDataset(
-        data_dirs, batch_size=batch_size, transform=transform, split="val", frame_skip=1
+        data_dirs, batch_size=batch_size, transform=transform, split="val", frame_skip=frame_skip
     )
 
     # 数据加载器配置
