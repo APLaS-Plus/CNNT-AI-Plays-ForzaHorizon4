@@ -62,54 +62,7 @@ if __name__ == "__main__":
         digit = easyocr_reader.recognize(
             digit_region, batch_size=10, allowlist="0123456789"
         )[0][1]
-        # digit = list(digit)
-        # for j in range(len(digit)):
-        #     if digit[j] == "g":
-        #         digit[j] = "9"
-        #     elif (
-        #         digit[j] == "o"
-        #         or digit[j] == "O"
-        #         or digit[j] == "C"
-        #         or digit[j] == "c"
-        #         or digit[j] == "D"
-        #         or digit[j] == "Q"
-        #         or digit[j] == "("
-        #         or digit[j] == "U"
-        #     ):
-        #         digit[j] = "0"
-        #     elif (
-        #         digit[j] == "l"
-        #         or digit[j] == "j"
-        #         or digit[j] == "i"
-        #         or digit[j] == "|"
-        #         or digit[j] == "!"
-        #     ):
-        #         digit[j] = "1"
-        #     elif (
-        #         digit[j] == "z" or digit[j] == "Z" or digit[j] == "r" or digit[j] == "]"
-        #     ):
-        #         digit[j] = "2"
-        #     elif digit[j] == "E" or digit[j] == "e":
-        #         digit[j] = "3"
-        #     elif digit[j] == "A" or digit[j] == "h":
-        #         digit[j] = "4"
-        #     elif digit[j] == "s" or digit[j] == "S" or digit[j] == "$":
-        #         digit[j] = "5"
-        #     elif digit[j] == "b" or digit[j] == "G" or digit[j] == "&":
-        #         digit[j] = "6"
-        #     elif digit[j] == "T" or digit[j] == "t" or digit[j] == "+":
-        #         digit[j] = "7"
-        #     elif digit[j] == "B" or digit[j] == "&":
-        #         digit[j] = "8"
-        #     elif (
-        #         digit[j] == "q" or digit[j] == "Q" or digit[j] == "g" or digit[j] == "j"
-        #     ):
-        #         digit[j] = "9"
-
-        # if digit[0] not in "012":
-        #     digit[0] = "0"
-        # digit = "".join(digit)
-        # digit = digit.replace(",", "").replace(".", "")
+        
         if len(digit) == 2:
             digit = "0" + digit
         elif len(digit) == 1:
@@ -121,9 +74,7 @@ if __name__ == "__main__":
                 print(
                     f"Warning: {digit} is not a valid digit. Please check the image: {img_path}"
                 )
-                # from PIL import Image
-                # img = Image.open(output_path)
-                # img.show()
+
                 import time
 
                 time.sleep(10000)

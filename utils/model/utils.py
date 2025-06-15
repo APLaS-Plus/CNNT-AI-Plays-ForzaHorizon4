@@ -1,18 +1,33 @@
 """
 Thanks the code from Ultralytics YOLO11 repository.
+Utility modules for neural network components including convolutional layers,
+attention mechanisms, and activation functions.
 """
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 
 def autopad(k, p=None, d=1):  # kernel, padding, dilation
-    """Pad to 'same' shape outputs."""
+    """
+    Automatically calculate padding to maintain 'same' shape outputs.
+
+    Args:
+        k (int | list): Kernel size(s)
+        p (int | list, optional): Padding size(s). If None, auto-calculate
+        d (int): Dilation factor
+
+    Returns:
+        int | list: Calculated padding size(s)
+    """
     if d > 1:
+        # Calculate actual kernel size with dilation
         k = (
             d * (k - 1) + 1 if isinstance(k, int) else [d * (x - 1) + 1 for x in k]
         )  # actual kernel-size
     if p is None:
+        # Auto-calculate padding for 'same' output
         p = k // 2 if isinstance(k, int) else [x // 2 for x in k]  # auto-pad
     return p
 
@@ -124,37 +139,56 @@ class GhostConv(nn.Module):
         y = self.cv1(x)
         return torch.cat((y, self.cv2(y)), 1)
 
+
 class Bottleneck(nn.Module):
+    """
+    Bottleneck residual block with squeeze-and-expand architecture.
+
+    This module implements a standard bottleneck block commonly used in ResNet-like
+    architectures. It first reduces the channel dimension, applies 3x3 convolution,
+    then expands back to the original dimension with a residual connection.
+
+    Attributes:
+        cv1 (Conv): 1x1 convolution for channel reduction
+        cv2 (Conv): 3x3 convolution for feature extraction
+        cv3 (Conv): 1x1 convolution for channel expansion (no activation)
+    """
+
     def __init__(self, c1, c2, k=1, s=1, p=None, g=1, d=1, act=True):
         """
-        Initialize Residual Convolution module with given parameters.
+        Initialize Bottleneck residual block with given parameters.
 
         Args:
-            c1 (int): Number of input channels.
-            c2 (int): Number of output channels.
-            k (int): Kernel size.
-            s (int): Stride.
-            p (int, optional): Padding.
-            g (int): Groups.
-            d (int): Dilation.
-            act (bool | nn.Module): Activation function.
+            c1 (int): Number of input channels
+            c2 (int): Number of output channels
+            k (int): Kernel size for first and last convolutions
+            s (int): Stride for convolutions
+            p (int, optional): Padding size
+            g (int): Number of groups for convolutions
+            d (int): Dilation factor
+            act (bool | nn.Module): Activation function configuration
         """
         super().__init__()
-        self.cv1 = Conv(c1, c2//2, k, s, p, g, d, act)
-        self.cv2 = Conv(c2//2, c2//2, 3, 1, p, g, d, act)
-        self.cv3 = Conv(c2//2, c2, k, s, p, g, d, act=False)
+        # First 1x1 conv: reduce channels by half
+        self.cv1 = Conv(c1, c2 // 2, k, s, p, g, d, act)
+        # 3x3 conv: maintain reduced channel count
+        self.cv2 = Conv(c2 // 2, c2 // 2, 3, 1, p, g, d, act)
+        # Final 1x1 conv: expand to output channels (no activation for residual)
+        self.cv3 = Conv(c2 // 2, c2, k, s, p, g, d, act=False)
 
     def forward(self, x):
         """
-        Apply Residual Convolution to input tensor.
+        Apply bottleneck transformation with residual connection.
 
         Args:
-            x (torch.Tensor): Input tensor.
+            x (torch.Tensor): Input tensor
 
         Returns:
-            (torch.Tensor): Output tensor with residual connection.
+            torch.Tensor: Output tensor with residual connection applied
         """
+        # Apply bottleneck transformation and add residual connection
         return self.cv3(self.cv2(self.cv1(x))) + x
+
 
 class ChannelAttention(nn.Module):
     """
@@ -277,24 +311,61 @@ class CBAM(nn.Module):
 
 
 class SimAM(nn.Module):
+    """
+    Simple Attention Module (SimAM) - A parameter-free attention mechanism.
+
+    SimAM computes attention weights based on the energy function that measures
+    the linear separability between each neuron and all other neurons in the
+    same channel. This approach requires no additional parameters.
+
+    Reference:
+        SimAM: A Simple, Parameter-Free Attention Module for Convolutional Neural Networks
+        https://proceedings.mlr.press/v139/yang21o.html
+
+    Attributes:
+        e_lambda (float): Energy function regularization parameter
+        eps (float): Small constant to avoid division by zero
+    """
+
     def __init__(self, e_lambda=1e-4, eps=1e-5):
+        """
+        Initialize SimAM attention module.
+
+        Args:
+            e_lambda (float): Regularization parameter for energy function
+            eps (float): Small epsilon value to prevent division by zero
+        """
         super(SimAM, self).__init__()
         self.e_lambda = e_lambda
         self.eps = eps
 
     def forward(self, x):
-        # x: (B, C, H, W)
+        """
+        Apply SimAM attention to input tensor.
+
+        Args:
+            x (torch.Tensor): Input tensor of shape (B, C, H, W)
+
+        Returns:
+            torch.Tensor: Attention-weighted output tensor
+        """
+        # Get tensor dimensions: Batch, Channel, Height, Width
         B, C, H, W = x.size()
-        n = H * W
+        n = H * W  # Total spatial dimensions
 
-        # 每个通道分别计算均值和方差
-        mean = x.mean(dim=[2, 3], keepdim=True)
-        var = ((x - mean) ** 2).mean(dim=[2, 3], keepdim=True)
+        # Calculate mean and variance for each channel separately
+        mean = x.mean(dim=[2, 3], keepdim=True)  # Channel-wise mean: (B, C, 1, 1)
+        var = ((x - mean) ** 2).mean(
+            dim=[2, 3], keepdim=True
+        )  # Channel-wise variance: (B, C, 1, 1)
 
-        # 能量函数
+        # Compute energy function for attention weight calculation
+        # Energy measures how distinguishable each pixel is from the channel mean
         e_lambda = self.e_lambda
         energy = ((x - mean) ** 2) / (var + self.eps) + e_lambda * x
 
-        # 注意力权重
+        # Convert energy to attention weights using sigmoid activation
         attention = torch.sigmoid(-energy)
+
+        # Apply attention weights to input
         return x * attention

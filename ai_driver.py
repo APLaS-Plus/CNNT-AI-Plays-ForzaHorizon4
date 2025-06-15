@@ -9,6 +9,7 @@ import math
 from PIL import Image
 import threading
 from collections import defaultdict
+import traceback
 
 ROOT_DIR = pathlib.Path(__file__).resolve().parent
 
@@ -18,7 +19,7 @@ UTILS_DIR = str(UTILS_DIR.resolve())
 sys.path.append(UTILS_DIR)
 from utils.capture_guideline import CaptureGuideline
 from utils.controller_output import ControllerOutput
-from utils.model.CNN_GLtransformer import CNNT
+from utils.model.CNN_transformer import CNN_Transformer
 from utils.model.lite_digit_detector import LiteDigitDetector
 
 
@@ -75,33 +76,9 @@ def sanitize_output(value):
     return value
 
 
-def debug_output(value):
-    """Detailed examination of potentially problematic output values"""
-    if torch.is_tensor(value):
-        torch_value = value.item()
-    else:
-        torch_value = value
-
-    print(f"Value: {value}")
-    print(f"Type: {type(value)}")
-    print(
-        f"torch.isnan: {torch.isnan(torch.tensor(value)) if torch.is_tensor(value) else torch.isnan(torch.tensor([value]))[0]}"
-    )
-    print(
-        f"numpy.isnan: {np.isnan(value) if isinstance(value, (float, int, np.number)) else np.isnan(np.array(value))}"
-    )
-    print(
-        f"math.isnan: {math.isnan(float(value)) if not isinstance(value, str) else 'N/A'}"
-    )
-    print(f"Value after float conversion: {float(value)}")
-    print(
-        f"Value hex representation: {value.hex() if isinstance(value, float) else 'N/A'}"
-    )
-
-
-class AIDriver:
+class AIDriverSimpleCNN:
     """
-    AI driver for Forza Horizon 4 using CNNT model for control prediction
+    AI driver for Forza Horizon 4 using CNN_Transformer model for control prediction
     and virtual controller for game input.
     """
 
@@ -116,19 +93,20 @@ class AIDriver:
         self.digit_detector = LiteDigitDetector(input_height=48, input_width=96)
         self.load_digit_detector()
 
-        # Initialize CNNT model
+        # Initialize CNN_Transformer model with 960*640 input size
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-        self.model = CNNT(
-            input_height=240, input_width=144, maxtime_step=40, memory_size=160
+        self.model = CNN_Transformer(
+            input_len=2,
+            seq_len=40,
+            embed_dim=256,
+            num_heads=8,
+            num_layers=2,
+            batch_size=1,  # Set to 1 for inference mode
         )
-        self.load_cnnt_model()
+        self.load_cnn_transformer_model()
 
-        # Initialize memory queues for sequential prediction
-        self.frame_queue = None
-        self.speed_queue = None
-        self.steering_queue = None
-        self.acceleration_queue = None
-        self.memory_queue = None
+        # Initialize feature queue for temporal modeling
+        self.feature_queue = None
 
         # Control flags
         self.running = False
@@ -152,46 +130,30 @@ class AIDriver:
             print("Using randomly initialized digit detector model")
         self.digit_detector.eval()
 
-    def load_cnnt_model(self):
-        """Load the CNNT model"""
-        model_path = ROOT_DIR / "model" / "CNNT" / "best_cnnt_model.pth"
+    def load_cnn_transformer_model(self):
+        """Load the CNN_Transformer model"""
+        model_path = (
+            ROOT_DIR / "model" / "CNN_Transformer" / "best_CNN_Transformer_model.pth"
+        )
         try:
             self.model.load_state_dict(
                 torch.load(str(model_path), map_location=self.device)
             )
-            print("Successfully loaded CNNT model weights")
+            print("Successfully loaded CNN_Transformer model weights")
         except Exception as e:
-            print(f"Error loading CNNT model: {e}")
-            print("Using randomly initialized CNNT model")
+            print(f"Error loading CNN_Transformer model: {e}")
+            print("Using randomly initialized CNN_Transformer model")
         self.model.to(self.device)
         self.model.eval()
 
     def detect_speed(self, digit_region):
         """Detect speed from digit region using the digit detector"""
         if digit_region is None:
-            return torch.tensor([[0.0]], device=self.device)
+            return torch.tensor([0.0], device=self.device)
 
         # Convert to grayscale
         img = cv2.cvtColor(digit_region, cv2.COLOR_BGR2GRAY)
-
-        # Apply median filter to remove noise
-        median = cv2.medianBlur(img, 3)
-
-        # Apply CLAHE (Contrast Limited Adaptive Histogram Equalization)
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        enhanced = clahe.apply(median)
-
-        # Apply adaptive thresholding
-        binary = cv2.adaptiveThreshold(
-            enhanced, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY, 15, 5
-        )
-
-        # Morphological operations to enhance character contours
-        kernel = np.ones((2, 2), np.uint8)
-        morph = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
-
-        # Convert processed image to PIL format
-        pil_img = Image.fromarray(morph, mode="L")
+        pil_img = Image.fromarray(img, mode="L")
 
         # Predict digits
         with torch.no_grad():
@@ -199,72 +161,44 @@ class AIDriver:
 
         # Calculate speed value
         speed_value = digits[0] * 100 + digits[1] * 10 + digits[2]
-        return torch.tensor([[float(speed_value)]], device=self.device)
+        # Normalize speed to [0, 1] range (assuming max speed around 400)
+        normalized_speed = min(speed_value / 400.0, 1.0)
+        return torch.tensor([float(normalized_speed)], device=self.device)
 
     def process_frame(self):
         """Process a single frame: capture, detect speed, predict controls"""
         with self.timer.measure("总处理时间"):
             # Get current state from screen
             with self.timer.measure("屏幕捕获"):
-                digit_region, blue_bird_eye_view = self.cgl.get_currunt_key_region()
+                digit_region, adjusted_frame = self.cgl.get_currunt_key_region()
 
-            # cv2.imshow("Digit Region", digit_region)
-            # cv2.imshow("Blue Bird Eye View", blue_bird_eye_view)
-            # if cv2.waitKey(1) & 0xFF == ord("q"):
-            #     print("Exiting due to 'q' key press")
-            #     self.running = False
-            #     return 0.0, 0.0
-            
             # Detect speed from digit region
             with self.timer.measure("速度检测"):
                 speed = self.detect_speed(digit_region)
 
-            # Convert guideline image for model input
+            # Convert guideline image for model input - 保持960x640分辨率
             with self.timer.measure("图像预处理"):
-                guideline_tensor = Image.fromarray(blue_bird_eye_view).convert("L")
+                guideline_tensor = Image.fromarray(adjusted_frame).convert("RGB")
                 transform = transforms.Compose(
                     [
-                        transforms.Resize((240, 144)),
+                        transforms.Resize((640, 960)),  # 保持原始分辨率
                         transforms.ToTensor(),
                     ]
                 )
                 guideline_tensor = transform(guideline_tensor).unsqueeze(0)
                 guideline_tensor = guideline_tensor.to(self.device)
 
-            # 获取当前转向和加速度值作为输入，如果是初始状态则设为零
-            current_steering = torch.zeros(1, 1, device=self.device)
-            current_acceleration = torch.zeros(1, 1, device=self.device)
-            if self.steering_queue is not None and self.acceleration_queue is not None:
-                current_steering = self.steering_queue[:, -1].unsqueeze(1)
-                current_acceleration = self.acceleration_queue[:, -1].unsqueeze(1)
-
-            # Model inference
+            # Model inference with temporal modeling
             with self.timer.measure("模型推理"):
                 with torch.no_grad():
-                    (
-                        steering,
-                        acceleration,
-                        self.memory_queue,
-                        self.frame_queue,
-                        self.speed_queue,
-                        self.steering_queue,
-                        self.acceleration_queue,
-                    ) = self.model(
-                        self.frame_queue,
-                        self.speed_queue,
-                        self.steering_queue,
-                        self.acceleration_queue,
-                        guideline_tensor,
-                        speed,
-                        current_steering,
-                        current_acceleration,
-                        self.memory_queue,
-                        device=self.device,
-                        timer=self.timer,
+                    acceleration_output, steering_output, self.feature_queue = (
+                        self.model(guideline_tensor, speed, self.feature_queue)
                     )
+                    steering = steering_output.squeeze().item()  # Extract scalar value
+                    acceleration = (
+                        acceleration_output.squeeze().item()
+                    )  # Extract scalar value
                     print("predict successfully")
-
-            steering, acceleration = steering.item(), acceleration.item()
 
         return steering, acceleration
 
@@ -293,7 +227,9 @@ class AIDriver:
         print("AI driver started. Press Ctrl+C to stop.")
 
         frame_count = 0
-        warmup_frames = 20  # Allow some frames for model to warm up
+        warmup_frames = (
+            10  # Increased warmup frames for CNN_Transformer temporal modeling
+        )
 
         try:
             while self.running:
@@ -307,18 +243,27 @@ class AIDriver:
                 # Only apply controls after warmup period
                 if frame_count >= warmup_frames:
                     self.update_controller(steering, acceleration)
+                    # Get current speed for display
+                    current_speed = self.detect_speed(
+                        self.cgl.get_currunt_key_region()[0]
+                    )
+                    speed_value = (
+                        current_speed.item() * 400.0
+                    )  # Denormalize for display
                     print(
-                        f"Frame {frame_count}: Speed: {self.speed_queue[:, -1].item():.1f}, "
+                        f"Frame {frame_count}: Speed: {speed_value:.1f}, "
                         f"Steering: {steering:.3f}, Acceleration: {acceleration:.3f}"
                     )
+                else:
+                    print(f"Warmup frame {frame_count + 1}/{warmup_frames}")
 
                 # Calculate processing time
                 process_time = time.time() - start_time
                 self.frame_times.append(process_time)
 
                 # Sleep to maintain target frame rate (20fps = 0.05s per frame)
-                if process_time < 0.1:
-                    time.sleep(0.1 - process_time)
+                if process_time < 0.2:
+                    time.sleep(0.2 - process_time)
 
                 # 每100帧打印一次耗时统计
                 if frame_count > 0 and frame_count % 100 == 0:
@@ -330,6 +275,7 @@ class AIDriver:
             print("Keyboard interrupt received, stopping driver")
         except Exception as e:
             print(f"Error in drive loop: {e}")
+            traceback.print_exc()
         finally:
             # 打印最终的耗时统计
             self.print_time_stats()
@@ -350,7 +296,7 @@ class AIDriver:
         """打印各模块耗时统计"""
         stats, total_time = self.timer.get_stats()
 
-        print("\n===== 模型性能统计 =====")
+        print("\n===== CNN_Transformer模型性能统计 =====")
         print(f"总耗时: {total_time:.4f}秒")
         print("-" * 40)
         print(f"{'模块名称':<25} {'平均耗时(ms)':<15} {'百分比':<10} {'调用次数'}")
@@ -373,7 +319,7 @@ class AIDriver:
             print("AI driver is already running")
             return
 
-        print("Starting AI driver...")
+        print("Starting CNN_Transformer AI driver...")
         self.running = True
         self.controller.start()
 
@@ -402,8 +348,8 @@ class AIDriver:
 
 def main():
     """Main function to start the AI driver"""
-    print("Initializing AI driver for Forza Horizon 4...")
-    driver = AIDriver()
+    print("Initializing CNN_Transformer AI driver for Forza Horizon 4...")
+    driver = AIDriverSimpleCNN()
 
     print("Wait 5 seconds to focus on the game window...")
     time.sleep(5)
